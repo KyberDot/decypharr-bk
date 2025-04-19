@@ -10,3 +10,12 @@ func EscapePath(path string) string {
 
 	return escapedPath
 }
+
+func UnescapePath(path string) string {
+	// unescape %
+	unescapedPath := strings.ReplaceAll(path, "%25", "%")
+
+	// add others
+
+	return unescapedPath
+}

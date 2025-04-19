@@ -109,11 +109,11 @@ func (c *Cache) refreshTorrents() {
 	if len(newTorrents) == 0 {
 		return
 	}
-	c.logger.Debug().Msgf("Found %d new torrents", len(newTorrents))
 
 	workChan := make(chan *types.Torrent, min(100, len(newTorrents)))
 	errChan := make(chan error, len(newTorrents))
 	var wg sync.WaitGroup
+	counter := 0
 
 	for i := 0; i < c.workers; i++ {
 		wg.Add(1)
@@ -121,13 +121,12 @@ func (c *Cache) refreshTorrents() {
 			defer wg.Done()
 			for t := range workChan {
 				select {
-				case <-c.ctx.Done():
-					return
 				default:
-				}
-				if err := c.ProcessTorrent(t); err != nil {
-					c.logger.Error().Err(err).Msgf("Failed to process new torrent %s", t.Id)
-					errChan <- err
+					if err := c.ProcessTorrent(t); err != nil {
+						c.logger.Error().Err(err).Msgf("Failed to process new torrent %s", t.Id)
+						errChan <- err
+					}
+					counter++
 				}
 			}
 		}()
@@ -135,8 +134,6 @@ func (c *Cache) refreshTorrents() {
 
 	for _, t := range newTorrents {
 		select {
-		case <-c.ctx.Done():
-			break
 		default:
 			workChan <- t
 		}
@@ -146,7 +143,7 @@ func (c *Cache) refreshTorrents() {
 
 	c.RefreshListings(true)
 
-	c.logger.Debug().Msgf("Processed %d new torrents", len(newTorrents))
+	c.logger.Debug().Msgf("Processed %d new torrents", counter)
 }
 
 func (c *Cache) RefreshRclone() error {

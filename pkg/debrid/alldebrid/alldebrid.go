@@ -198,15 +198,16 @@ func (ad *AllDebrid) UpdateTorrent(t *types.Torrent) error {
 	t.Folder = name
 	t.MountPath = ad.MountPath
 	t.Debrid = ad.Name
+	t.Bytes = data.Size
+	t.Seeders = data.Seeders
 	if status == "downloaded" {
-		t.Bytes = data.Size
-
-		t.Progress = float64((data.Downloaded / data.Size) * 100)
-		t.Speed = data.DownloadSpeed
-		t.Seeders = data.Seeders
+		t.Progress = 100
 		index := -1
 		files := flattenFiles(data.Files, "", &index)
 		t.Files = files
+	} else {
+		t.Progress = float64(data.Downloaded) / float64(data.Size) * 100
+		t.Speed = data.DownloadSpeed
 	}
 	return nil
 }
@@ -269,7 +270,7 @@ func (ad *AllDebrid) GenerateDownloadLinks(t *types.Torrent) error {
 			}
 			file.DownloadLink = link
 			if link != nil {
-				errCh <- fmt.Errorf("error getting download links %w", err)
+				errCh <- fmt.Errorf("download link is empty")
 				return
 			}
 			filesCh <- file
@@ -310,9 +311,13 @@ func (ad *AllDebrid) GetDownloadLink(t *types.Torrent, file *types.File) (*types
 	if err = json.Unmarshal(resp, &data); err != nil {
 		return nil, err
 	}
+
+	if data.Error != nil {
+		return nil, fmt.Errorf("error getting download link: %s", data.Error.Message)
+	}
 	link := data.Data.Link
 	if link == "" {
-		return nil, fmt.Errorf("error getting download links %s", data.Error.Message)
+		return nil, fmt.Errorf("download link is empty")
 	}
 	return &types.DownloadLink{
 		Link:         file.Link,

@@ -37,6 +37,11 @@ func (c *Cache) IsTorrentBroken(t *CachedTorrent, filenames []string) bool {
 		}
 	}
 
+	if t == nil || t.Torrent == nil {
+		c.logger.Error().Str("torrentId", t.Torrent.Id).Msg("Failed to refresh torrent")
+		return true
+	}
+
 	files = t.Files
 
 	for _, f := range files {
@@ -58,13 +63,11 @@ func (c *Cache) IsTorrentBroken(t *CachedTorrent, filenames []string) bool {
 	// Try to reinsert the torrent if it's broken
 	if cfg.Repair.ReInsert && isBroken && t.Torrent != nil {
 		// Check if the torrent is already in progress
-		if err := c.reInsertTorrent(t); err != nil {
+		if _, err := c.reInsertTorrent(t); err != nil {
 			c.logger.Error().Err(err).Str("torrentId", t.Torrent.Id).Msg("Failed to reinsert torrent")
 			return true
-		} else {
-			c.logger.Debug().Str("torrentId", t.Torrent.Id).Msg("Reinserted torrent")
-			return false
 		}
+		return false
 	}
 
 	return isBroken
@@ -86,7 +89,7 @@ func (c *Cache) repairWorker() {
 		switch req.Type {
 		case RepairTypeReinsert:
 			c.logger.Debug().Str("torrentId", torrentId).Msg("Reinserting torrent")
-			if err := c.reInsertTorrent(cachedTorrent); err != nil {
+			if _, err := c.reInsertTorrent(cachedTorrent); err != nil {
 				c.logger.Error().Err(err).Str("torrentId", cachedTorrent.Id).Msg("Failed to reinsert torrent")
 				continue
 			}
@@ -100,12 +103,12 @@ func (c *Cache) repairWorker() {
 	}
 }
 
-func (c *Cache) reInsertTorrent(ct *CachedTorrent) error {
+func (c *Cache) reInsertTorrent(ct *CachedTorrent) (*CachedTorrent, error) {
 	// Check if Magnet is not empty, if empty, reconstruct the magnet
 	torrent := ct.Torrent
 	oldID := torrent.Id // Store the old ID
 	if _, ok := c.repairsInProgress.Load(oldID); ok {
-		return fmt.Errorf("repair already in progress for torrent %s", torrent.Id)
+		return ct, fmt.Errorf("repair already in progress for torrent %s", torrent.Id)
 	}
 	c.repairsInProgress.Store(oldID, struct{}{})
 	defer c.repairsInProgress.Delete(oldID)
@@ -120,53 +123,53 @@ func (c *Cache) reInsertTorrent(ct *CachedTorrent) error {
 	torrent, err = c.client.SubmitMagnet(torrent)
 	if err != nil {
 		// Remove the old torrent from the cache and debrid service
-		return fmt.Errorf("failed to submit magnet: %w", err)
+		return ct, fmt.Errorf("failed to submit magnet: %w", err)
 	}
 
 	// Check if the torrent was submitted
 	if torrent == nil || torrent.Id == "" {
-		return fmt.Errorf("failed to submit magnet: empty torrent")
+		return ct, fmt.Errorf("failed to submit magnet: empty torrent")
 	}
 	torrent.DownloadUncached = false // Set to false, avoid re-downloading
 	torrent, err = c.client.CheckStatus(torrent, true)
 	if err != nil && torrent != nil {
 		// Torrent is likely in progress
 		_ = c.DeleteTorrent(torrent.Id)
-
-		return fmt.Errorf("failed to check status: %w", err)
+		return ct, fmt.Errorf("failed to check status: %w", err)
 	}
-
 	if torrent == nil {
-		return fmt.Errorf("failed to check status: empty torrent")
+		return ct, fmt.Errorf("failed to check status: empty torrent")
 	}
 
 	// Update the torrent in the cache
 	addedOn, err := time.Parse(time.RFC3339, torrent.Added)
+	if err != nil {
+		addedOn = time.Now()
+	}
 	for _, f := range torrent.Files {
 		if f.Link == "" {
 			// Delete the new torrent
 			_ = c.DeleteTorrent(torrent.Id)
-			return fmt.Errorf("failed to reinsert torrent: empty link")
+			return ct, fmt.Errorf("failed to reinsert torrent: empty link")
 		}
-	}
-	if err != nil {
-		addedOn = time.Now()
 	}
 
 	// We can safely delete the old torrent here
 	if oldID != "" {
 		if err := c.DeleteTorrent(oldID); err != nil {
-			return fmt.Errorf("failed to delete old torrent: %w", err)
+			return ct, fmt.Errorf("failed to delete old torrent: %w", err)
 		}
 	}
-	ct.Torrent = torrent
-	ct.IsComplete = len(torrent.Files) > 0
-	ct.AddedOn = addedOn
+	ct = &CachedTorrent{
+		Torrent:    torrent,
+		AddedOn:    addedOn,
+		IsComplete: len(torrent.Files) > 0,
+	}
 	c.setTorrent(ct)
 	c.RefreshListings(true)
 	c.logger.Debug().Str("torrentId", torrent.Id).Msg("Reinserted torrent")
 
-	return nil
+	return ct, nil
 }
 
 func (c *Cache) resetInvalidLinks() {

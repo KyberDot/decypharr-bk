@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/request"
+	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/debrid/debrid"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"github.com/sirrobot01/decypharr/pkg/version"
@@ -103,7 +104,7 @@ func (h *Handler) getParentFiles() []os.FileInfo {
 }
 
 func (h *Handler) OpenFile(ctx context.Context, name string, flag int, perm os.FileMode) (webdav.File, error) {
-	name = path.Clean("/" + name)
+	name = utils.UnescapePath(path.Clean("/" + name))
 	rootDir := h.getRootPath()
 
 	metadataOnly := ctx.Value("metadataOnly") != nil
@@ -261,16 +262,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// __all__ or torrents folder
 			// Manually build the xml
 			ttl = 30 * time.Second
-			if served := h.serveFromCacheIfValid(w, r, cacheKey, ttl); served {
-				return
-			}
-			// Refresh the parent XML
-			h.cache.RefreshListings(false)
-			// Check again if the cache is valid
-			// If not, we will use the default WebDAV handler
-			if served := h.serveFromCacheIfValid(w, r, cacheKey, ttl); served {
-				return
-			}
+			//if served := h.serveFromCacheIfValid(w, r, cacheKey, ttl); served {
+			//	return
+			//}
+			//// Refresh the parent XML
+			//h.cache.RefreshListings(false)
+			//// Check again if the cache is valid
+			//// If not, we will use the default WebDAV handler
+			//if served := h.serveFromCacheIfValid(w, r, cacheKey, ttl); served {
+			//	return
+			//}
 		}
 
 		if served := h.serveFromCacheIfValid(w, r, cacheKey, ttl); served {

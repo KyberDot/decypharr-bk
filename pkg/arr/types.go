@@ -1,5 +1,7 @@
 package arr
 
+import "os"
+
 type Movie struct {
 	Title         string `json:"title"`
 	OriginalTitle string `json:"originalTitle"`
@@ -23,6 +25,12 @@ type ContentFile struct {
 	IsSymlink    bool   `json:"isSymlink"`
 	IsBroken     bool   `json:"isBroken"`
 	SeasonNumber int    `json:"seasonNumber"`
+}
+
+func (file *ContentFile) Delete() {
+	// This is useful for when sonarr bulk delete fails(this usually happens)
+	// and we need to delete the file manually
+	_ = os.Remove(file.Path) // nolint:errcheck
 }
 
 type Content struct {

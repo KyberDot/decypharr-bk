@@ -228,7 +228,7 @@ type Torrent struct {
 }
 
 func (t *Torrent) IsReady() bool {
-	return t.AmountLeft <= 0 && t.TorrentPath != ""
+	return (t.AmountLeft <= 0 || t.Progress == 1) && t.TorrentPath != ""
 }
 
 func (t *Torrent) discordContext() string {

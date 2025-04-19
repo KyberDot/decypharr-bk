@@ -194,7 +194,6 @@ func (c *Cache) load() (map[string]*CachedTorrent, error) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			now := time.Now()
 
 			for {
 				file, ok := <-workChan
@@ -227,11 +226,10 @@ func (c *Cache) load() (map[string]*CachedTorrent, error) {
 					}
 
 					if isComplete {
-						addedOn, err := time.Parse(time.RFC3339, ct.Added)
-						if err != nil {
-							addedOn = now
+
+						if addedOn, err := time.Parse(time.RFC3339, ct.Added); err == nil {
+							ct.AddedOn = addedOn
 						}
-						ct.AddedOn = addedOn
 						ct.IsComplete = true
 						ct.Name = path.Clean(ct.Name)
 						results.Store(ct.Id, &ct)
@@ -278,9 +276,9 @@ func (c *Cache) Sync() error {
 	c.logger.Info().Msgf("Got %d torrents from %s", len(torrents), c.client.GetName())
 
 	newTorrents := make([]*types.Torrent, 0)
-	idStore := make(map[string]struct{}, len(torrents))
+	idStore := make(map[string]string, len(torrents))
 	for _, t := range torrents {
-		idStore[t.Id] = struct{}{}
+		idStore[t.Id] = t.Added
 		if _, ok := cachedTorrents[t.Id]; !ok {
 			newTorrents = append(newTorrents, t)
 		}
@@ -289,6 +287,10 @@ func (c *Cache) Sync() error {
 	// Check for deleted torrents
 	deletedTorrents := make([]string, 0)
 	for _, t := range cachedTorrents {
+		t.Added = idStore[t.Id]
+		if addedOn, err := time.Parse(time.RFC3339, t.Added); err == nil {
+			t.AddedOn = addedOn
+		}
 		if _, ok := idStore[t.Id]; !ok {
 			deletedTorrents = append(deletedTorrents, t.Id)
 		}
@@ -399,20 +401,35 @@ func (c *Cache) GetTorrentFolder(torrent *types.Torrent) string {
 
 func (c *Cache) setTorrent(t *CachedTorrent) {
 	c.torrents.Store(t.Id, t)
-
-	c.torrentsNames.Store(c.GetTorrentFolder(t.Torrent), t)
-
+	torrentKey := c.GetTorrentFolder(t.Torrent)
+	if o, ok := c.torrentsNames.Load(torrentKey); ok && o.Id != t.Id {
+		// Save the most recent torrent
+		if t.AddedOn.After(o.AddedOn) {
+			c.torrentsNames.Delete(torrentKey)
+		} else {
+			t = o
+		}
+	}
+	c.torrentsNames.Store(torrentKey, t)
 	c.SaveTorrent(t)
 }
 
 func (c *Cache) setTorrents(torrents map[string]*CachedTorrent) {
 	for _, t := range torrents {
 		c.torrents.Store(t.Id, t)
-		c.torrentsNames.Store(c.GetTorrentFolder(t.Torrent), t)
+		torrentKey := c.GetTorrentFolder(t.Torrent)
+		if o, ok := c.torrentsNames.Load(torrentKey); ok && o.Id != t.Id {
+			// Save the most recent torrent
+			if t.AddedOn.After(o.AddedOn) {
+				c.torrentsNames.Delete(torrentKey)
+			} else {
+				t = o
+			}
+		}
+		c.torrentsNames.Store(torrentKey, t)
 	}
 
-	c.RefreshListings(true)
-
+	c.RefreshListings(false)
 	c.SaveTorrents()
 }
 
@@ -552,13 +569,6 @@ func (c *Cache) ProcessTorrent(t *types.Torrent) error {
 
 	if !isComplete(t.Files) {
 		c.logger.Debug().Msgf("Torrent %s is still not complete. Triggering a reinsert(disabled)", t.Id)
-		//err := c.reInsertTorrent(t)
-		//if err != nil {
-		//	c.logger.Error().Err(err).Msgf("Failed to reinsert torrent %s", t.Id)
-		//	return err
-		//}
-		//c.logger.Debug().Msgf("Reinserted torrent %s", ct.Id)
-
 	} else {
 		addedOn, err := time.Parse(time.RFC3339, t.Added)
 		if err != nil {
@@ -601,10 +611,12 @@ func (c *Cache) GetDownloadLink(torrentId, filename, fileLink string) string {
 	if file.Link == "" {
 		c.logger.Debug().Msgf("File link is empty for %s. Release is probably nerfed", filename)
 		// Try to reinsert the torrent?
-		if err := c.reInsertTorrent(ct); err != nil {
+		newCt, err := c.reInsertTorrent(ct)
+		if err != nil {
 			c.logger.Error().Err(err).Msgf("Failed to reinsert torrent %s", ct.Name)
 			return ""
 		}
+		ct = newCt
 		file = ct.Files[filename]
 		c.logger.Debug().Msgf("Reinserted torrent %s", ct.Name)
 	}
@@ -614,11 +626,12 @@ func (c *Cache) GetDownloadLink(torrentId, filename, fileLink string) string {
 	if err != nil {
 		if errors.Is(err, request.HosterUnavailableError) {
 			c.logger.Error().Err(err).Msgf("Hoster is unavailable. Triggering repair for %s", ct.Name)
-			err := c.reInsertTorrent(ct)
+			newCt, err := c.reInsertTorrent(ct)
 			if err != nil {
 				c.logger.Error().Err(err).Msgf("Failed to reinsert torrent %s", ct.Name)
 				return ""
 			}
+			ct = newCt
 			c.logger.Debug().Msgf("Reinserted torrent %s", ct.Name)
 			file = ct.Files[filename]
 			// Retry getting the download link

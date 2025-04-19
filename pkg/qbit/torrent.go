@@ -181,8 +181,7 @@ func (q *QBit) UpdateTorrentMin(t *Torrent, debridTorrent *debrid.Torrent) *Torr
 		addedOn = time.Now()
 	}
 	totalSize := debridTorrent.Bytes
-	progress := cmp.Or(debridTorrent.Progress, 0.0)
-	progress = progress / 100.0
+	progress := (cmp.Or(debridTorrent.Progress, 0.0)) / 100.0
 	sizeCompleted := int64(float64(totalSize) * progress)
 
 	var speed int64
@@ -218,9 +217,11 @@ func (q *QBit) UpdateTorrent(t *Torrent, debridTorrent *debrid.Torrent) *Torrent
 	if debridTorrent == nil {
 		return t
 	}
-	_db := service.GetDebrid().GetClient(debridTorrent.Debrid)
-	if debridTorrent.Status != "downloaded" {
-		_ = _db.UpdateTorrent(debridTorrent)
+
+	if debridClient := service.GetDebrid().GetClient(debridTorrent.Debrid); debridClient != nil {
+		if debridTorrent.Status != "downloaded" {
+			_ = debridClient.UpdateTorrent(debridTorrent)
+		}
 	}
 	t = q.UpdateTorrentMin(t, debridTorrent)
 	t.ContentPath = t.TorrentPath + string(os.PathSeparator)

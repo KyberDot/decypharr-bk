@@ -247,6 +247,12 @@ func (a *Arr) DeleteFiles(files []ContentFile) error {
 	for _, f := range files {
 		ids = append(ids, f.FileId)
 	}
+	defer func() {
+		// Delete files, or at least try
+		for _, f := range files {
+			f.Delete()
+		}
+	}()
 	var payload interface{}
 	switch a.Type {
 	case Sonarr:

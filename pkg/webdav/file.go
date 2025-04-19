@@ -81,14 +81,14 @@ func (f *File) stream() (*http.Response, error) {
 
 	downloadLink = f.getDownloadLink() // Uses the first API key
 	if downloadLink == "" {
-		_log.Error().Msgf("Failed to get download link for %s. Empty download link", f.name)
-		return nil, fmt.Errorf("failed to get download link")
+		_log.Trace().Msgf("Failed to get download link for %s. Empty download link", f.name)
+		return nil, io.EOF
 	}
 
 	req, err := http.NewRequest("GET", downloadLink, nil)
 	if err != nil {
-		_log.Error().Msgf("Failed to create HTTP request: %s", err)
-		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
+		_log.Trace().Msgf("Failed to create HTTP request: %s", err)
+		return nil, io.EOF
 	}
 
 	if f.offset > 0 {
@@ -97,7 +97,7 @@ func (f *File) stream() (*http.Response, error) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return resp, fmt.Errorf("HTTP request error: %w", err)
+		return resp, io.EOF
 	}
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
@@ -113,15 +113,17 @@ func (f *File) stream() (*http.Response, error) {
 			b, _ := io.ReadAll(resp.Body)
 			err := resp.Body.Close()
 			if err != nil {
-				return nil, err
+				_log.Trace().Msgf("Failed to close response body: %s", err)
+				return nil, io.EOF
 			}
 			if strings.Contains(string(b), "You can not download this file because you have exceeded your traffic on this hoster") {
-				_log.Error().Msgf("Failed to get download link for %s. Download link expired", f.name)
+				_log.Trace().Msgf("Failed to get download link for %s. Download link expired", f.name)
 				f.cache.MarkDownloadLinkAsInvalid(f.link, downloadLink, "bandwidth_exceeded")
 				// Retry with a different API key if it's available
 				return f.stream()
 			} else {
-				return resp, fmt.Errorf("link not found")
+				_log.Trace().Msgf("Failed to get download link for %s. %s", f.name, string(b))
+				return resp, io.EOF
 			}
 
 		} else if resp.StatusCode == http.StatusNotFound {
@@ -132,12 +134,12 @@ func (f *File) stream() (*http.Response, error) {
 			// Generate a new download link
 			downloadLink = f.getDownloadLink()
 			if downloadLink == "" {
-				_log.Error().Msgf("Failed to get download link for %s", f.name)
-				return nil, fmt.Errorf("failed to get download link")
+				_log.Trace().Msgf("Failed to get download link for %s", f.name)
+				return nil, io.EOF
 			}
 			req, err = http.NewRequest("GET", downloadLink, nil)
 			if err != nil {
-				return nil, fmt.Errorf("failed to create HTTP request: %w", err)
+				return nil, io.EOF
 			}
 			if f.offset > 0 {
 				req.Header.Set("Range", fmt.Sprintf("bytes=%d-", f.offset))
@@ -151,13 +153,13 @@ func (f *File) stream() (*http.Response, error) {
 				closeResp()
 				// Read the body to consume the response
 				f.cache.MarkDownloadLinkAsInvalid(f.link, downloadLink, "link_not_found")
-				return resp, fmt.Errorf("link not found")
+				return resp, io.EOF
 			}
 			return resp, nil
 
 		} else {
 			closeResp()
-			return resp, fmt.Errorf("unexpected HTTP status: %d", resp.StatusCode)
+			return resp, io.EOF
 		}
 
 	}
@@ -194,7 +196,7 @@ func (f *File) Read(p []byte) (n int, err error) {
 			return 0, err
 		}
 		if resp == nil {
-			return 0, fmt.Errorf("failed to get response")
+			return 0, io.EOF
 		}
 
 		f.reader = resp.Body
