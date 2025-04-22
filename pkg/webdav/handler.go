@@ -2,6 +2,7 @@ package webdav
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"fmt"
 	"github.com/rs/zerolog"
@@ -185,7 +186,7 @@ func (h *Handler) OpenFile(ctx context.Context, name string, flag int, perm os.F
 		if file, ok := cachedTorrent.Files[filename]; ok {
 			return &File{
 				cache:        h.cache,
-				torrentId:    file.TorrentId,
+				torrentId:    cmp.Or(file.TorrentId, cachedTorrent.Id),
 				fileId:       file.Id,
 				isDir:        false,
 				name:         file.Name,

@@ -222,12 +222,14 @@ func (c *Cache) load() (map[string]*CachedTorrent, error) {
 				isComplete := true
 				if len(ct.Files) != 0 {
 					// Check if all files are valid, if not, delete the file.json and remove from cache.
+					fs := make(map[string]types.File, len(ct.Files))
 					for _, f := range ct.Files {
-						f.TorrentId = ct.Id
 						if f.Link == "" {
 							isComplete = false
 							break
 						}
+						f.TorrentId = ct.Id
+						fs[f.Name] = f
 					}
 
 					if isComplete {
@@ -237,6 +239,7 @@ func (c *Cache) load() (map[string]*CachedTorrent, error) {
 						}
 						ct.IsComplete = true
 						ct.Name = path.Clean(ct.Name)
+						ct.Files = fs
 						results.Store(ct.Id, &ct)
 					}
 				}
