@@ -220,10 +220,11 @@ func (tb *Torbox) UpdateTorrent(t *types.Torrent) error {
 			continue
 		}
 		file := types.File{
-			Id:   strconv.Itoa(f.Id),
-			Name: fileName,
-			Size: f.Size,
-			Path: fileName,
+			TorrentId: t.Id,
+			Id:        strconv.Itoa(f.Id),
+			Name:      fileName,
+			Size:      f.Size,
+			Path:      fileName,
 		}
 		t.Files[fileName] = file
 	}

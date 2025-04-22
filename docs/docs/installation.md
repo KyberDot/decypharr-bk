@@ -32,12 +32,11 @@ services:
     image: cy01/blackhole:latest # or cy01/blackhole:beta
     container_name: decypharr
     ports:
-      - "8282:8282" # qBittorrent
-      - "8181:8181" # Proxy
+      - "8282:8282"
     user: "1000:1000"
     volumes:
       - /mnt/:/mnt
-      - ./configs/:/app # config.json must be in this directory
+      - ./config/:/app # config.json must be in this directory
     environment:
       - PUID=1000
       - PGID=1000
@@ -65,7 +64,31 @@ Create a configuration file (see Configuration)
 Run the binary:
 ```bash
 chmod +x decypharr
-./decypharr --config /path/to/config
+./decypharr --config /path/to/config/folder
 ```
 
 The config directory should contain your config.json file.
+
+## config.json
+
+The `config.json` file is where you configure DecyphArr. You can find a sample configuration file in the `configs` directory of the repository.
+
+```json
+{
+  "debrids": [
+    {
+      "name": "realdebrid",
+      "api_key": "your_api_key_here",
+      "folder": "/mnt/remote/realdebrid/__all__/",
+      "use_webdav": true
+    }
+  ],
+  "qbittorrent": {
+    "download_folder": "/mnt/symlinks/",
+    "categories": ["sonarr", "radarr"]
+  },
+  "use_auth": false,
+  "log_level": "info",
+  "port": "8282"
+}
+```

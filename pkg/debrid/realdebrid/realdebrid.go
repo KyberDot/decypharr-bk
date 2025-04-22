@@ -111,10 +111,11 @@ func getSelectedFiles(t *types.Torrent, data torrentInfo) map[string]types.File 
 		if f.Selected == 1 {
 			name := filepath.Base(f.Path)
 			file := types.File{
-				Name: name,
-				Path: name,
-				Size: f.Bytes,
-				Id:   strconv.Itoa(f.ID),
+				TorrentId: t.Id,
+				Name:      name,
+				Path:      name,
+				Size:      f.Bytes,
+				Id:        strconv.Itoa(f.ID),
 			}
 			selectedFiles = append(selectedFiles, file)
 		}
@@ -153,10 +154,11 @@ func getTorrentFiles(t *types.Torrent, data torrentInfo) map[string]types.File {
 		}
 
 		file := types.File{
-			Name: name,
-			Path: name,
-			Size: f.Bytes,
-			Id:   strconv.Itoa(f.ID),
+			TorrentId: t.Id,
+			Name:      name,
+			Path:      name,
+			Size:      f.Bytes,
+			Id:        strconv.Itoa(f.ID),
 		}
 		files[name] = file
 		idx++

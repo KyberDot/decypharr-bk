@@ -223,6 +223,7 @@ func (c *Cache) load() (map[string]*CachedTorrent, error) {
 				if len(ct.Files) != 0 {
 					// Check if all files are valid, if not, delete the file.json and remove from cache.
 					for _, f := range ct.Files {
+						f.TorrentId = ct.Id
 						if f.Link == "" {
 							isComplete = false
 							break

@@ -134,7 +134,9 @@ func (c *Cache) reInsertTorrent(ct *CachedTorrent) (*CachedTorrent, error) {
 	torrent, err = c.client.CheckStatus(torrent, true)
 	if err != nil && torrent != nil {
 		// Torrent is likely uncached, delete it
-		_ = c.client.DeleteTorrent(torrent.Id) // Delete the newly added un-cached torrent
+		if err := c.client.DeleteTorrent(torrent.Id); err != nil {
+			c.logger.Error().Err(err).Str("torrentId", torrent.Id).Msg("Failed to delete torrent")
+		} // Delete the newly added un-cached torrent
 		return ct, fmt.Errorf("failed to check status: %w", err)
 	}
 	if torrent == nil {
@@ -153,7 +155,7 @@ func (c *Cache) reInsertTorrent(ct *CachedTorrent) (*CachedTorrent, error) {
 			return ct, fmt.Errorf("failed to reinsert torrent: empty link")
 		}
 	}
-
+	
 	// We can safely delete the old torrent here
 	if oldID != "" {
 		if err := c.DeleteTorrent(oldID); err != nil {

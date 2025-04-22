@@ -122,7 +122,7 @@ func getAlldebridStatus(statusCode int) string {
 	}
 }
 
-func flattenFiles(files []MagnetFile, parentPath string, index *int) map[string]types.File {
+func flattenFiles(torrentId string, files []MagnetFile, parentPath string, index *int) map[string]types.File {
 	result := make(map[string]types.File)
 
 	cfg := config.Get()
@@ -135,7 +135,7 @@ func flattenFiles(files []MagnetFile, parentPath string, index *int) map[string]
 
 		if f.Elements != nil {
 			// This is a folder, recurse into it
-			subFiles := flattenFiles(f.Elements, currentPath, index)
+			subFiles := flattenFiles(torrentId, f.Elements, currentPath, index)
 			for k, v := range subFiles {
 				if _, ok := result[k]; ok {
 					// File already exists, use path as key
@@ -162,11 +162,12 @@ func flattenFiles(files []MagnetFile, parentPath string, index *int) map[string]
 
 			*index++
 			file := types.File{
-				Id:   strconv.Itoa(*index),
-				Name: fileName,
-				Size: f.Size,
-				Path: currentPath,
-				Link: f.Link,
+				TorrentId: torrentId,
+				Id:        strconv.Itoa(*index),
+				Name:      fileName,
+				Size:      f.Size,
+				Path:      currentPath,
+				Link:      f.Link,
 			}
 			result[file.Name] = file
 		}
@@ -203,7 +204,7 @@ func (ad *AllDebrid) UpdateTorrent(t *types.Torrent) error {
 	if status == "downloaded" {
 		t.Progress = 100
 		index := -1
-		files := flattenFiles(data.Files, "", &index)
+		files := flattenFiles(t.Id, data.Files, "", &index)
 		t.Files = files
 	} else {
 		t.Progress = float64(data.Downloaded) / float64(data.Size) * 100

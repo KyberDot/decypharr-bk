@@ -27,6 +27,7 @@ DecyphArr includes several advanced features that extend its capabilities:
 
 - [Repair Worker](repair-worker.md): Identifies and fixes issues with your media files
 - [WebDAV Server](webdav.md): Provides direct access to your Debrid files
+- [Using with Rclone](rclone.md): Mount the WebDAV server locally for easier access
 
 ## Supported Debrid Providers
 

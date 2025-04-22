@@ -137,10 +137,11 @@ func (dl *DebridLink) UpdateTorrent(t *types.Torrent) error {
 			continue
 		}
 		file := types.File{
-			Id:   f.ID,
-			Name: f.Name,
-			Size: f.Size,
-			Path: f.Name,
+			TorrentId: t.Id,
+			Id:        f.ID,
+			Name:      f.Name,
+			Size:      f.Size,
+			Path:      f.Name,
 			DownloadLink: &types.DownloadLink{
 				Filename:     f.Name,
 				Link:         f.DownloadURL,
@@ -189,11 +190,12 @@ func (dl *DebridLink) SubmitMagnet(t *types.Torrent) (*types.Torrent, error) {
 	t.Debrid = dl.Name
 	for _, f := range data.Files {
 		file := types.File{
-			Id:   f.ID,
-			Name: f.Name,
-			Size: f.Size,
-			Path: f.Name,
-			Link: f.DownloadURL,
+			TorrentId: t.Id,
+			Id:        f.ID,
+			Name:      f.Name,
+			Size:      f.Size,
+			Path:      f.Name,
+			Link:      f.DownloadURL,
 			DownloadLink: &types.DownloadLink{
 				Filename:     f.Name,
 				Link:         f.DownloadURL,
@@ -370,10 +372,11 @@ func (dl *DebridLink) getTorrents(page, perPage int) ([]*types.Torrent, error) {
 				continue
 			}
 			file := types.File{
-				Id:   f.ID,
-				Name: f.Name,
-				Size: f.Size,
-				Path: f.Name,
+				TorrentId: torrent.Id,
+				Id:        f.ID,
+				Name:      f.Name,
+				Size:      f.Size,
+				Path:      f.Name,
 				DownloadLink: &types.DownloadLink{
 					Filename:     f.Name,
 					Link:         f.DownloadURL,

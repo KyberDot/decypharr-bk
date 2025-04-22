@@ -183,9 +183,9 @@ func (h *Handler) OpenFile(ctx context.Context, name string, flag int, perm os.F
 		// Torrent file level
 		filename := strings.Join(parts[2:], "/")
 		if file, ok := cachedTorrent.Files[filename]; ok {
-			fi := &File{
+			return &File{
 				cache:        h.cache,
-				torrentId:    cachedTorrent.Id,
+				torrentId:    file.TorrentId,
 				fileId:       file.Id,
 				isDir:        false,
 				name:         file.Name,
@@ -193,8 +193,7 @@ func (h *Handler) OpenFile(ctx context.Context, name string, flag int, perm os.F
 				link:         file.Link,
 				metadataOnly: metadataOnly,
 				modTime:      cachedTorrent.AddedOn,
-			}
-			return fi, nil
+			}, nil
 		}
 	}
 
