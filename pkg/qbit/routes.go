@@ -10,7 +10,7 @@ func (q *QBit) Routes() http.Handler {
 	r.Use(q.CategoryContext)
 	r.Group(func(r chi.Router) {
 		r.Use(q.authContext)
-		r.Post("/register/login", q.handleLogin)
+		r.Post("/auth/login", q.handleLogin)
 		r.Route("/torrents", func(r chi.Router) {
 			r.Use(HashesCtx)
 			r.Get("/info", q.handleTorrentsInfo)
