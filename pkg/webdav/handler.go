@@ -4,6 +4,18 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"html/template"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path"
+	"path/filepath"
+	"slices"
+	"strings"
+	"time"
+
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/request"
 	"github.com/sirrobot01/decypharr/internal/utils"
@@ -11,16 +23,6 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"github.com/sirrobot01/decypharr/pkg/version"
 	"golang.org/x/net/webdav"
-	"html/template"
-	"io"
-	"net/http"
-	"net/http/httptest"
-	"net/url"
-	"os"
-	path "path/filepath"
-	"slices"
-	"strings"
-	"time"
 )
 
 type Handler struct {
@@ -47,9 +49,12 @@ func (h *Handler) Mkdir(ctx context.Context, name string, perm os.FileMode) erro
 
 // RemoveAll implements webdav.FileSystem
 func (h *Handler) RemoveAll(ctx context.Context, name string) error {
-	name = path.Clean("/" + name)
+	if name[0] != '/' {
+		name = "/" + name
+	}
+	name = filepath.Clean(name)
 
-	rootDir := h.getRootPath()
+	rootDir := filepath.Clean(h.getRootPath())
 
 	if name == rootDir {
 		return os.ErrPermission
@@ -72,7 +77,7 @@ func (h *Handler) Rename(ctx context.Context, oldName, newName string) error {
 }
 
 func (h *Handler) getRootPath() string {
-	return fmt.Sprintf("/webdav/%s", h.Name)
+	return fmt.Sprintf(filepath.Join(string(os.PathSeparator), "webdav", "%s"), h.Name)
 }
 
 func (h *Handler) getTorrentsFolders() []os.FileInfo {
@@ -104,8 +109,11 @@ func (h *Handler) getParentFiles() []os.FileInfo {
 }
 
 func (h *Handler) OpenFile(ctx context.Context, name string, flag int, perm os.FileMode) (webdav.File, error) {
-	name = utils.UnescapePath(path.Clean("/" + name))
-	rootDir := h.getRootPath()
+	if name[0] != '/' {
+		name = "/" + name
+	}
+	name = utils.UnescapePath(filepath.Clean(name))
+	rootDir := filepath.Clean(h.getRootPath())
 
 	metadataOnly := ctx.Value("metadataOnly") != nil
 
@@ -118,11 +126,11 @@ func (h *Handler) OpenFile(ctx context.Context, name string, flag int, perm os.F
 			cache:        h.cache,
 			isDir:        true,
 			children:     h.getParentFiles(),
-			name:         "/",
+			name:         string(os.PathSeparator),
 			metadataOnly: true,
 			modTime:      now,
 		}, nil
-	case path.Join(rootDir, "version.txt"):
+	case filepath.Join(rootDir, "version.txt"):
 		versionInfo := version.GetInfo().String()
 		return &File{
 			cache:        h.cache,
@@ -138,7 +146,7 @@ func (h *Handler) OpenFile(ctx context.Context, name string, flag int, perm os.F
 	// Single check for top-level folders
 	if h.isParentPath(name) {
 		folderName := strings.TrimPrefix(name, rootDir)
-		folderName = strings.TrimPrefix(folderName, "/")
+		folderName = strings.TrimPrefix(folderName, string(os.PathSeparator))
 
 		// Only fetcher the torrent folders once
 		children := h.getTorrentsFolders()
@@ -155,7 +163,7 @@ func (h *Handler) OpenFile(ctx context.Context, name string, flag int, perm os.F
 	}
 
 	_path := strings.TrimPrefix(name, rootDir)
-	parts := strings.Split(strings.TrimPrefix(_path, "/"), "/")
+	parts := strings.Split(strings.TrimPrefix(_path, string(os.PathSeparator)), string(os.PathSeparator))
 
 	if len(parts) >= 2 && (slices.Contains(h.getParentItems(), parts[0])) {
 
@@ -181,7 +189,7 @@ func (h *Handler) OpenFile(ctx context.Context, name string, flag int, perm os.F
 		}
 
 		// Torrent file level
-		filename := strings.Join(parts[2:], "/")
+		filename := filepath.Join(parts[2:]...)
 		if file, ok := cachedTorrent.Files[filename]; ok {
 			return &File{
 				cache:        h.cache,
@@ -239,7 +247,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Set metadata only
 		ctx := context.WithValue(r.Context(), "metadataOnly", true)
 		r = r.WithContext(ctx)
-		cleanPath := path.Clean(r.URL.Path)
+		cleanPath := filepath.Clean(r.URL.Path)
 		if r.Header.Get("Depth") == "" {
 			r.Header.Set("Depth", "1")
 		}
@@ -399,7 +407,7 @@ func (h *Handler) isParentPath(_path string) bool {
 	rootPath := h.getRootPath()
 	parents := h.getParentItems()
 	for _, p := range parents {
-		if path.Clean(_path) == path.Clean(path.Join(rootPath, p)) {
+		if filepath.Clean(_path) == filepath.Clean(filepath.Join(rootPath, p)) {
 			return true
 		}
 	}

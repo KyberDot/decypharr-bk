@@ -2,12 +2,14 @@ package debrid
 
 import (
 	"fmt"
-	"github.com/beevik/etree"
-	"github.com/sirrobot01/decypharr/internal/request"
 	"net/http"
 	"os"
-	path "path/filepath"
+	"path"
+	"path/filepath"
 	"time"
+
+	"github.com/beevik/etree"
+	"github.com/sirrobot01/decypharr/internal/request"
 )
 
 // resetPropfindResponse resets the propfind response cache for the specified parent directories.
@@ -64,15 +66,15 @@ func (c *Cache) refreshParentXml(torrents []os.FileInfo, clientName, parent stri
 	currentTime := time.Now().UTC().Format(http.TimeFormat)
 
 	// Add the parent directory
-	baseUrl := path.Clean(fmt.Sprintf("/webdav/%s/%s", clientName, parent))
-	parentPath := fmt.Sprintf("%s/", baseUrl)
+	baseUrl := path.Clean(path.Join("webdav", clientName, parent))
+	parentPath := path.Join(baseUrl)
 	addDirectoryResponse(multistatus, parentPath, parent, currentTime)
 
 	// Add torrents to the XML
 	for _, torrent := range torrents {
 		name := torrent.Name()
 		// Note the path structure change - parent first, then torrent name
-		torrentPath := fmt.Sprintf("/webdav/%s/%s/%s/",
+		torrentPath := filepath.Join("webdav",
 			clientName,
 			parent,
 			name,

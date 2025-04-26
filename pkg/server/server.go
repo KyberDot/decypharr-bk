@@ -4,19 +4,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"os/signal"
+	"runtime"
+	"syscall"
+
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/logger"
 	"github.com/sirrobot01/decypharr/internal/request"
-	"io"
-	"net/http"
-	"os"
-	"os/signal"
-	path "path/filepath"
-	"runtime"
-	"syscall"
 )
 
 type Server struct {
@@ -34,9 +35,9 @@ func New(handlers map[string]http.Handler) *Server {
 	s := &Server{
 		logger: l,
 	}
-
-	r.Handle(path.Join(cfg.URLBase, "static")+"/*",
-		http.StripPrefix(path.Join(cfg.URLBase, "static"), http.FileServer(http.Dir("static"))),
+	staticPath, _ := url.JoinPath(cfg.URLBase, "static")
+	r.Handle(staticPath+"/*",
+		http.StripPrefix(staticPath, http.FileServer(http.Dir("static"))),
 	)
 
 	r.Route(cfg.URLBase, func(r chi.Router) {

@@ -3,6 +3,7 @@ package webdav
 import (
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 )
 
@@ -10,11 +11,11 @@ import (
 // /webdav/alldebrid/__all__/TorrentName
 func getName(rootDir, path string) (string, string) {
 	path = strings.TrimPrefix(path, rootDir)
-	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	parts := strings.Split(strings.TrimPrefix(path, string(os.PathSeparator)), string(os.PathSeparator))
 	if len(parts) < 2 {
 		return "", ""
 	}
-	return parts[1], strings.Join(parts[2:], "/") // Note the change from [0] to [1]
+	return parts[1], strings.Join(parts[2:], string(os.PathSeparator)) // Note the change from [0] to [1]
 }
 
 func acceptsGzip(r *http.Request) bool {
