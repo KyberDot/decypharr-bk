@@ -95,9 +95,17 @@ func (c *Cache) refreshTorrents() {
 		currentTorrentIds[t.Id] = struct{}{}
 	}
 
-	// Because of how fast AddTorrent is, a torrent might be added before we check
-	// So let's disable the deletion of torrents for now
-	// Deletion now moved to the cleanupWorker
+	// Let's implement deleting torrents removed from debrid
+	deletedTorrents := make([]string, 0)
+	c.torrents.Range(func(key string, _ string) bool {
+		if _, exists := currentTorrentIds[key]; !exists {
+			deletedTorrents = append(deletedTorrents, key)
+		}
+		return true
+	})
+
+	// Validate the torrents are truly deleted, then remove them from the cache too
+	go c.validateAndDeleteTorrents(deletedTorrents)
 
 	newTorrents := make([]*types.Torrent, 0)
 	for _, t := range debTorrents {

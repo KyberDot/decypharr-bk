@@ -71,7 +71,7 @@ func (f *File) getDownloadLink() (string, error) {
 		f.downloadLink = downloadLink
 		return downloadLink, nil
 	}
-	return "", fmt.Errorf("download link not found")
+	return "", os.ErrNotExist
 }
 
 func (f *File) stream() (*http.Response, error) {
@@ -203,7 +203,7 @@ func (f *File) Read(p []byte) (n int, err error) {
 		// Make the request to get the file
 		resp, err := f.stream()
 		if err != nil {
-			return 0, err
+			return 0, io.EOF
 		}
 		if resp == nil {
 			return 0, io.EOF
@@ -216,10 +216,7 @@ func (f *File) Read(p []byte) (n int, err error) {
 	n, err = f.reader.Read(p)
 	f.offset += int64(n)
 
-	if err == io.EOF {
-		f.reader.Close()
-		f.reader = nil
-	} else if err != nil {
+	if err != nil {
 		f.reader.Close()
 		f.reader = nil
 	}

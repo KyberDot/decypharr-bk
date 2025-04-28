@@ -59,7 +59,7 @@ func (c *Cache) GetDownloadLink(torrentName, filename, fileLink string) (string,
 func (c *Cache) fetchDownloadLink(torrentName, filename, fileLink string) (string, error) {
 	ct := c.GetTorrentByName(torrentName)
 	if ct == nil {
-		return "", fmt.Errorf("torrent not found: %s", torrentName)
+		return "", fmt.Errorf("torrent not found")
 	}
 	file := ct.Files[filename]
 
@@ -67,7 +67,7 @@ func (c *Cache) fetchDownloadLink(torrentName, filename, fileLink string) (strin
 		// file link is empty, refresh the torrent to get restricted links
 		ct = c.refreshTorrent(file.TorrentId) // Refresh the torrent from the debrid
 		if ct == nil {
-			return "", fmt.Errorf("failed to refresh torrent: %s", torrentName)
+			return "", fmt.Errorf("failed to refresh torrent")
 		} else {
 			file = ct.Files[filename]
 		}
@@ -75,11 +75,10 @@ func (c *Cache) fetchDownloadLink(torrentName, filename, fileLink string) (strin
 
 	// If file.Link is still empty, return
 	if file.Link == "" {
-		c.logger.Debug().Msgf("File link is empty for %s. Release is probably nerfed", filename)
 		// Try to reinsert the torrent?
 		newCt, err := c.reInsertTorrent(ct)
 		if err != nil {
-			return "", fmt.Errorf("failed to reinsert torrent: %s. %w", ct.Name, err)
+			return "", fmt.Errorf("failed to reinsert torrent. %w", err)
 		}
 		ct = newCt
 		file = ct.Files[filename]
@@ -103,19 +102,19 @@ func (c *Cache) fetchDownloadLink(torrentName, filename, fileLink string) (strin
 				return "", err
 			}
 			if downloadLink == nil {
-				return "", fmt.Errorf("download link is empty for %s", file.Link)
+				return "", fmt.Errorf("download link is empty for")
 			}
 			c.updateDownloadLink(downloadLink)
 			return "", nil
 		} else if errors.Is(err, request.TrafficExceededError) {
 			// This is likely a fair usage limit error
-			c.logger.Error().Err(err).Msgf("Traffic exceeded for %s", ct.Name)
+			return "", err
 		} else {
 			return "", fmt.Errorf("failed to get download link: %w", err)
 		}
 	}
 	if downloadLink == nil {
-		return "", fmt.Errorf("download link is empty for %s", file.Link)
+		return "", fmt.Errorf("download link is empty")
 	}
 	c.updateDownloadLink(downloadLink)
 	return downloadLink.DownloadLink, nil
@@ -124,6 +123,7 @@ func (c *Cache) fetchDownloadLink(torrentName, filename, fileLink string) (strin
 func (c *Cache) GenerateDownloadLinks(t *CachedTorrent) {
 	if err := c.client.GenerateDownloadLinks(t.Torrent); err != nil {
 		c.logger.Error().Err(err).Msg("Failed to generate download links")
+		return
 	}
 	for _, file := range t.Files {
 		if file.DownloadLink != nil {
@@ -131,7 +131,6 @@ func (c *Cache) GenerateDownloadLinks(t *CachedTorrent) {
 		}
 
 	}
-
 	c.SaveTorrent(t)
 }
 

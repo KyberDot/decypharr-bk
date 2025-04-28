@@ -2,6 +2,7 @@ package debrid
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -319,8 +320,7 @@ func (c *Cache) Sync() error {
 		c.logger.Info().Msgf("Found %d deleted torrents", len(deletedTorrents))
 		for _, id := range deletedTorrents {
 			if _, ok := cachedTorrents[id]; ok {
-				delete(cachedTorrents, id)
-				c.removeFromDB(id)
+				c.validateAndDeleteTorrents(deletedTorrents)
 			}
 		}
 	}
@@ -422,6 +422,7 @@ func (c *Cache) GetTorrentFolder(torrent *types.Torrent) string {
 
 func (c *Cache) setTorrent(t *CachedTorrent) {
 	torrentKey := c.GetTorrentFolder(t.Torrent)
+	c.torrents.Store(t.Id, torrentKey) // Store the torrent id with the folder name(we might change the id after,  hence why it's stored here)
 	if o, ok := c.torrentsNames.Load(torrentKey); ok && o.Id != t.Id {
 		// If another torrent with the same name exists, merge the files, if the same file exists,
 		// keep the one with the most recent added date
@@ -434,7 +435,6 @@ func (c *Cache) setTorrent(t *CachedTorrent) {
 		t.Files = mergedFiles
 
 	}
-	c.torrents.Store(t.Id, torrentKey)
 	c.torrentsNames.Store(torrentKey, t)
 	c.SaveTorrent(t)
 }
@@ -442,6 +442,7 @@ func (c *Cache) setTorrent(t *CachedTorrent) {
 func (c *Cache) setTorrents(torrents map[string]*CachedTorrent) {
 	for _, t := range torrents {
 		torrentKey := c.GetTorrentFolder(t.Torrent)
+		c.torrents.Store(t.Id, torrentKey)
 		if o, ok := c.torrentsNames.Load(torrentKey); ok && o.Id != t.Id {
 			// Save the most recent torrent
 			if o.AddedOn.After(t.AddedOn) {
@@ -450,7 +451,6 @@ func (c *Cache) setTorrents(torrents map[string]*CachedTorrent) {
 			mergedFiles := mergeFiles(t, o)
 			t.Files = mergedFiles
 		}
-		c.torrents.Store(t.Id, torrentKey)
 		c.torrentsNames.Store(torrentKey, t)
 	}
 	c.RefreshListings(false)
@@ -649,6 +649,26 @@ func (c *Cache) DeleteTorrent(id string) error {
 	return nil
 }
 
+func (c *Cache) validateAndDeleteTorrents(torrents []string) {
+	wg := sync.WaitGroup{}
+	for _, torrent := range torrents {
+		wg.Add(1)
+		go func(t string) {
+			defer wg.Done()
+			// Check if torrent is truly deleted
+			if a, err := c.client.GetTorrent(t); err != nil {
+				c.deleteTorrent(t, false) // Since it's removed from debrid already
+			} else {
+				c.logger.Trace().Msgf("Torrent %s is still present", t)
+			}
+		}(torrent)
+	}
+	wg.Wait()
+	c.RefreshListings(true)
+}
+
+// deleteTorrent deletes the torrent from the cache and debrid service
+// It also handles torrents with the same name but different IDs
 func (c *Cache) deleteTorrent(id string, removeFromDebrid bool) bool {
 
 	if torrentName, ok := c.torrents.Load(id); ok {
@@ -663,10 +683,12 @@ func (c *Cache) deleteTorrent(id string, removeFromDebrid bool) bool {
 		if t, ok := c.torrentsNames.Load(torrentName); ok {
 
 			newFiles := map[string]types.File{}
-			newId := t.Id
+			newId := ""
 			for _, file := range t.Files {
 				if file.TorrentId != "" && file.TorrentId != id {
-					newId = file.TorrentId
+					if newId == "" && file.TorrentId != "" {
+						newId = file.TorrentId
+					}
 					newFiles[file.Name] = file
 				}
 			}
@@ -675,6 +697,7 @@ func (c *Cache) deleteTorrent(id string, removeFromDebrid bool) bool {
 				c.torrentsNames.Delete(torrentName)
 			} else {
 				t.Files = newFiles
+				newId = cmp.Or(newId, t.Id)
 				t.Id = newId
 				c.setTorrent(t)
 			}

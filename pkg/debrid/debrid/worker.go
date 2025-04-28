@@ -37,42 +37,5 @@ func (c *Cache) StartSchedule() error {
 		c.logger.Trace().Msgf("Next reset invalid download links job at: %s", t.Format("2006-01-02 15:04:05"))
 	}
 
-	// Schedule the cleanup job
-
-	cleanupJob, err := utils.ScheduleJob(ctx, "1h", nil, c.cleanupWorker)
-	if err != nil {
-		c.logger.Error().Err(err).Msg("Failed to add cleanup job")
-	}
-	if t, err := cleanupJob.NextRun(); err == nil {
-		c.logger.Trace().Msgf("Next cleanup job at: %s", t.Format("2006-01-02 15:04:05"))
-	}
-
 	return nil
-}
-
-func (c *Cache) cleanupWorker() {
-	// Cleanup every hour
-	torrents, err := c.client.GetTorrents()
-	if err != nil {
-		c.logger.Error().Err(err).Msg("Failed to get torrents")
-		return
-	}
-
-	idStore := make(map[string]struct{})
-	for _, t := range torrents {
-		idStore[t.Id] = struct{}{}
-	}
-
-	deletedTorrents := make([]string, 0)
-	c.torrents.Range(func(key string, _ string) bool {
-		if _, exists := idStore[key]; !exists {
-			deletedTorrents = append(deletedTorrents, key)
-		}
-		return true
-	})
-
-	if len(deletedTorrents) > 0 {
-		c.DeleteTorrents(deletedTorrents)
-		c.logger.Info().Msgf("Deleted %d torrents", len(deletedTorrents))
-	}
 }

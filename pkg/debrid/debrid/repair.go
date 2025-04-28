@@ -9,6 +9,7 @@ import (
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"slices"
+	"sync"
 	"time"
 )
 
@@ -215,4 +216,5 @@ func (c *Cache) reInsertTorrent(ct *CachedTorrent) (*CachedTorrent, error) {
 func (c *Cache) resetInvalidLinks() {
 	c.invalidDownloadLinks = xsync.NewMapOf[string, string]()
 	c.client.ResetActiveDownloadKeys() // Reset the active download keys
+	c.failedToReinsert = sync.Map{}    // Reset the failed to reinsert map
 }

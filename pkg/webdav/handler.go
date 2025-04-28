@@ -361,6 +361,27 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.Method == "HEAD" {
+		f, err := h.OpenFile(r.Context(), r.URL.Path, os.O_RDONLY, 0)
+		if err != nil {
+			h.logger.Error().Err(err).Str("path", r.URL.Path).Msg("Failed to open file")
+			http.NotFound(w, r)
+			return
+		}
+		defer f.Close()
+
+		fi, err := f.Stat()
+		if err != nil {
+			h.logger.Error().Err(err).Msg("Failed to stat file")
+			http.Error(w, "Server Error", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", getContentType(fi.Name()))
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", fi.Size()))
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	// Fallback: for other methods, use the standard WebDAV handler.
 	handler := &webdav.Handler{
 		FileSystem: h,

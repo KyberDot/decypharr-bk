@@ -47,7 +47,6 @@ func (c *Cache) RefreshParentXml() error {
 			return fmt.Errorf("failed to refresh XML for %s: %v", parent, err)
 		}
 	}
-	c.logger.Trace().Msgf("Refreshed XML cache for %s", c.client.GetName())
 	return nil
 }
 
