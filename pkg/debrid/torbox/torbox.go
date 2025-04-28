@@ -183,6 +183,74 @@ func getTorboxStatus(status string, finished bool) string {
 	}
 }
 
+func (tb *Torbox) GetTorrent(torrentId string) (*types.Torrent, error) {
+	url := fmt.Sprintf("%s/api/torrents/mylist/?id=%s", tb.Host, torrentId)
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	resp, err := tb.client.MakeRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	var res InfoResponse
+	err = json.Unmarshal(resp, &res)
+	if err != nil {
+		return nil, err
+	}
+	data := res.Data
+	if data == nil {
+		return nil, fmt.Errorf("error getting torrent")
+	}
+	t := &types.Torrent{
+		Id:               strconv.Itoa(data.Id),
+		Name:             data.Name,
+		Bytes:            data.Size,
+		Folder:           data.Name,
+		Progress:         data.Progress * 100,
+		Status:           getTorboxStatus(data.DownloadState, data.DownloadFinished),
+		Speed:            data.DownloadSpeed,
+		Seeders:          data.Seeds,
+		Filename:         data.Name,
+		OriginalFilename: data.Name,
+		MountPath:        tb.MountPath,
+		Debrid:           tb.Name,
+		Files:            make(map[string]types.File),
+		Added:            data.CreatedAt.Format(time.RFC3339),
+	}
+	cfg := config.Get()
+	for _, f := range data.Files {
+		fileName := filepath.Base(f.Name)
+		if utils.IsSampleFile(f.AbsolutePath) {
+			// Skip sample files
+			continue
+		}
+		if !cfg.IsAllowedFile(fileName) {
+			continue
+		}
+
+		if !cfg.IsSizeAllowed(f.Size) {
+			continue
+		}
+		file := types.File{
+			TorrentId: t.Id,
+			Id:        strconv.Itoa(f.Id),
+			Name:      fileName,
+			Size:      f.Size,
+			Path:      fileName,
+		}
+		t.Files[fileName] = file
+	}
+	var cleanPath string
+	if len(t.Files) > 0 {
+		cleanPath = path.Clean(data.Files[0].Name)
+	} else {
+		cleanPath = path.Clean(data.Name)
+	}
+
+	t.OriginalFilename = strings.Split(cleanPath, "/")[0]
+	t.Debrid = tb.Name
+
+	return t, nil
+}
+
 func (tb *Torbox) UpdateTorrent(t *types.Torrent) error {
 	url := fmt.Sprintf("%s/api/torrents/mylist/?id=%s", tb.Host, t.Id)
 	req, _ := http.NewRequest(http.MethodGet, url, nil)

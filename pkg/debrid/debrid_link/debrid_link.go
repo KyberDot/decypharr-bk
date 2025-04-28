@@ -92,6 +92,65 @@ func (dl *DebridLink) IsAvailable(hashes []string) map[string]bool {
 	return result
 }
 
+func (dl *DebridLink) GetTorrent(torrentId string) (*types.Torrent, error) {
+	url := fmt.Sprintf("%s/seedbox/%s", dl.Host, torrentId)
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	resp, err := dl.client.MakeRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	var res torrentInfo
+	err = json.Unmarshal(resp, &res)
+	if err != nil {
+		return nil, err
+	}
+	if !res.Success || res.Value == nil {
+		return nil, fmt.Errorf("error getting torrent")
+	}
+	data := *res.Value
+
+	if len(data) == 0 {
+		return nil, fmt.Errorf("torrent not found")
+	}
+	t := data[0]
+	name := utils.RemoveInvalidChars(t.Name)
+	torrent := &types.Torrent{
+		Id:               t.ID,
+		Name:             name,
+		Bytes:            t.TotalSize,
+		Status:           "downloaded",
+		Filename:         name,
+		OriginalFilename: name,
+		MountPath:        dl.MountPath,
+		Debrid:           dl.Name,
+		Added:            time.Unix(t.Created, 0).Format(time.RFC3339),
+	}
+	cfg := config.Get()
+	for _, f := range t.Files {
+		if !cfg.IsSizeAllowed(f.Size) {
+			continue
+		}
+		file := types.File{
+			TorrentId: t.ID,
+			Id:        f.ID,
+			Name:      f.Name,
+			Size:      f.Size,
+			Path:      f.Name,
+			DownloadLink: &types.DownloadLink{
+				Filename:     f.Name,
+				Link:         f.DownloadURL,
+				DownloadLink: f.DownloadURL,
+				Generated:    time.Now(),
+				AccountId:    "0",
+			},
+			Link: f.DownloadURL,
+		}
+		torrent.Files[file.Name] = file
+	}
+
+	return torrent, nil
+}
+
 func (dl *DebridLink) UpdateTorrent(t *types.Torrent) error {
 	url := fmt.Sprintf("%s/seedbox/list?ids=%s", dl.Host, t.Id)
 	req, _ := http.NewRequest(http.MethodGet, url, nil)
@@ -131,6 +190,7 @@ func (dl *DebridLink) UpdateTorrent(t *types.Torrent) error {
 	t.Seeders = data.PeersConnected
 	t.Filename = name
 	t.OriginalFilename = name
+	t.Added = time.Unix(data.Created, 0).Format(time.RFC3339)
 	cfg := config.Get()
 	for _, f := range data.Files {
 		if !cfg.IsSizeAllowed(f.Size) {
@@ -188,6 +248,7 @@ func (dl *DebridLink) SubmitMagnet(t *types.Torrent) (*types.Torrent, error) {
 	t.OriginalFilename = name
 	t.MountPath = dl.MountPath
 	t.Debrid = dl.Name
+	t.Added = time.Unix(data.Created, 0).Format(time.RFC3339)
 	for _, f := range data.Files {
 		file := types.File{
 			TorrentId: t.Id,
@@ -365,6 +426,7 @@ func (dl *DebridLink) getTorrents(page, perPage int) ([]*types.Torrent, error) {
 			Files:            make(map[string]types.File),
 			Debrid:           dl.Name,
 			MountPath:        dl.MountPath,
+			Added:            time.Unix(t.Created, 0).Format(time.RFC3339),
 		}
 		cfg := config.Get()
 		for _, f := range t.Files {

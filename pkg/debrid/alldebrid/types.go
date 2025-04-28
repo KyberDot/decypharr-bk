@@ -18,13 +18,13 @@ type magnetInfo struct {
 	Hash           string       `json:"hash"`
 	Status         string       `json:"status"`
 	StatusCode     int          `json:"statusCode"`
-	UploadDate     int          `json:"uploadDate"`
+	UploadDate     int64        `json:"uploadDate"`
 	Downloaded     int64        `json:"downloaded"`
 	Uploaded       int64        `json:"uploaded"`
 	DownloadSpeed  int64        `json:"downloadSpeed"`
 	UploadSpeed    int64        `json:"uploadSpeed"`
 	Seeders        int          `json:"seeders"`
-	CompletionDate int          `json:"completionDate"`
+	CompletionDate int64        `json:"completionDate"`
 	Type           string       `json:"type"`
 	Notified       bool         `json:"notified"`
 	Version        int          `json:"version"`

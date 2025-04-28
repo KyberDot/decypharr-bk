@@ -14,6 +14,7 @@ type Client interface {
 	GetCheckCached() bool
 	GetDownloadUncached() bool
 	UpdateTorrent(torrent *Torrent) error
+	GetTorrent(torrentId string) (*Torrent, error)
 	GetTorrents() ([]*Torrent, error)
 	GetName() string
 	GetLogger() zerolog.Logger

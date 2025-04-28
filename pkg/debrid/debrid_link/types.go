@@ -14,7 +14,7 @@ type AvailableResponse APIResponse[map[string]map[string]struct {
 	} `json:"files"`
 }]
 
-type debridLinkTorrentInfo struct {
+type _torrentInfo struct {
 	ID             string  `json:"id"`
 	Name           string  `json:"name"`
 	HashString     string  `json:"hashString"`
@@ -40,6 +40,6 @@ type debridLinkTorrentInfo struct {
 	UploadSpeed     int64   `json:"uploadSpeed"`
 }
 
-type torrentInfo APIResponse[[]debridLinkTorrentInfo]
+type torrentInfo APIResponse[[]_torrentInfo]
 
-type SubmitTorrentInfo APIResponse[debridLinkTorrentInfo]
+type SubmitTorrentInfo APIResponse[_torrentInfo]

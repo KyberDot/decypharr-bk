@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -45,6 +46,15 @@ type CachedTorrent struct {
 	AddedOn      time.Time `json:"added_on"`
 	IsComplete   bool      `json:"is_complete"`
 	DuplicateIds []string  `json:"duplicate_ids"`
+}
+
+func (ct *CachedTorrent) addDuplicateId(id string) {
+	if ct.DuplicateIds == nil {
+		ct.DuplicateIds = make([]string, 0)
+	}
+	if !slices.Contains(ct.DuplicateIds, id) {
+		ct.DuplicateIds = append(ct.DuplicateIds, id)
+	}
 }
 
 type downloadLinkCache struct {
@@ -412,12 +422,17 @@ func (c *Cache) GetTorrentFolder(torrent *types.Torrent) string {
 
 func (c *Cache) setTorrent(t *CachedTorrent) {
 	torrentKey := c.GetTorrentFolder(t.Torrent)
-	if o, ok := c.torrentsNames.Load(torrentKey); ok && t.Id != o.Id {
+	if o, ok := c.torrentsNames.Load(torrentKey); ok && o.Id != t.Id {
 		// If another torrent with the same name exists, merge the files, if the same file exists,
 		// keep the one with the most recent added date
 
-		mergedFiles := mergeFiles(t, o)
+		// Save the most recent torrent
+		if o.AddedOn.After(t.AddedOn) {
+			t = o
+		}
+		mergedFiles := mergeFiles(t, o) // Useful for merging files across multiple torrents, while keeping the most recent
 		t.Files = mergedFiles
+
 	}
 	c.torrents.Store(t.Id, torrentKey)
 	c.torrentsNames.Store(torrentKey, t)
@@ -427,15 +442,17 @@ func (c *Cache) setTorrent(t *CachedTorrent) {
 func (c *Cache) setTorrents(torrents map[string]*CachedTorrent) {
 	for _, t := range torrents {
 		torrentKey := c.GetTorrentFolder(t.Torrent)
-		if o, ok := c.torrentsNames.Load(torrentKey); ok && t.Id != o.Id {
+		if o, ok := c.torrentsNames.Load(torrentKey); ok && o.Id != t.Id {
 			// Save the most recent torrent
+			if o.AddedOn.After(t.AddedOn) {
+				t = o
+			}
 			mergedFiles := mergeFiles(t, o)
 			t.Files = mergedFiles
 		}
 		c.torrents.Store(t.Id, torrentKey)
 		c.torrentsNames.Store(torrentKey, t)
 	}
-
 	c.RefreshListings(false)
 	c.SaveTorrents()
 }
@@ -635,7 +652,7 @@ func (c *Cache) DeleteTorrent(id string) error {
 func (c *Cache) deleteTorrent(id string, removeFromDebrid bool) bool {
 
 	if torrentName, ok := c.torrents.Load(id); ok {
-		c.torrents.Delete(id) // Delete from id cache
+		c.torrents.Delete(id) // Delete id from cache
 		defer func() {
 			c.removeFromDB(id)
 			if removeFromDebrid {
@@ -643,7 +660,8 @@ func (c *Cache) deleteTorrent(id string, removeFromDebrid bool) bool {
 			}
 		}() // defer delete from debrid
 
-		if t, ok := c.torrentsNames.Load(torrentName); ok && t.Id == id {
+		if t, ok := c.torrentsNames.Load(torrentName); ok {
+
 			newFiles := map[string]types.File{}
 			newId := t.Id
 			for _, file := range t.Files {

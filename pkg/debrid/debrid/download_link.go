@@ -65,7 +65,7 @@ func (c *Cache) fetchDownloadLink(torrentName, filename, fileLink string) (strin
 
 	if file.Link == "" {
 		// file link is empty, refresh the torrent to get restricted links
-		ct = c.refreshTorrent(ct) // Refresh the torrent from the debrid
+		ct = c.refreshTorrent(file.TorrentId) // Refresh the torrent from the debrid
 		if ct == nil {
 			return "", fmt.Errorf("failed to refresh torrent: %s", torrentName)
 		} else {

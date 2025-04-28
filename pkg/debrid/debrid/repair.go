@@ -55,7 +55,7 @@ func (c *Cache) IsTorrentBroken(t *CachedTorrent, filenames []string) bool {
 		// Check if file is missing
 		if f.Link == "" {
 			// refresh torrent and then break
-			if newT := c.refreshTorrent(t); newT != nil {
+			if newT := c.refreshTorrent(f.TorrentId); newT != nil {
 				t = newT
 			} else {
 				c.logger.Error().Str("torrentId", t.Torrent.Id).Msg("Failed to refresh torrent")

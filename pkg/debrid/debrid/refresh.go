@@ -1,10 +1,8 @@
 package debrid
 
 import (
-	"errors"
 	"fmt"
 	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/request"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"io"
@@ -205,33 +203,20 @@ func (c *Cache) RefreshRclone() error {
 	return nil
 }
 
-func (c *Cache) refreshTorrent(t *CachedTorrent) *CachedTorrent {
-	_torrent := t.Torrent
-	err := c.client.UpdateTorrent(_torrent)
+func (c *Cache) refreshTorrent(torrentId string) *CachedTorrent {
+	torrent, err := c.client.GetTorrent(torrentId)
 	if err != nil {
-		if errors.Is(err, request.TorrentNotFoundError) {
-			c.logger.Trace().Msgf("Torrent %s not found. Removing from cache", _torrent.Id)
-			err := c.DeleteTorrent(_torrent.Id)
-			if err != nil {
-				c.logger.Error().Err(err).Msgf("Failed to delete torrent %s from cache", _torrent.Id)
-				return nil
-			}
-			return nil
-		}
-		c.logger.Debug().Err(err).Msgf("Failed to get torrent files for %s", t.Id)
+		c.logger.Error().Err(err).Msgf("Failed to get torrent %s", torrentId)
 		return nil
 	}
-	if len(t.Files) == 0 {
-		return nil
-	}
-	addedOn, err := time.Parse(time.RFC3339, _torrent.Added)
+	addedOn, err := time.Parse(time.RFC3339, torrent.Added)
 	if err != nil {
 		addedOn = time.Now()
 	}
 	ct := &CachedTorrent{
-		Torrent:    _torrent,
+		Torrent:    torrent,
 		AddedOn:    addedOn,
-		IsComplete: len(t.Files) > 0,
+		IsComplete: len(torrent.Files) > 0,
 	}
 	c.setTorrent(ct)
 

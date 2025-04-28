@@ -258,6 +258,49 @@ func (r *RealDebrid) addMagnet(t *types.Torrent) (*types.Torrent, error) {
 	return t, nil
 }
 
+func (r *RealDebrid) GetTorrent(torrentId string) (*types.Torrent, error) {
+	url := fmt.Sprintf("%s/torrents/info/%s", r.Host, torrentId)
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading response body: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, request.TorrentNotFoundError
+		}
+		return nil, fmt.Errorf("realdebrid API error: Status: %d || Body: %s", resp.StatusCode, string(bodyBytes))
+	}
+	var data torrentInfo
+	err = json.Unmarshal(bodyBytes, &data)
+	if err != nil {
+		return nil, err
+	}
+	t := &types.Torrent{
+		Id:               data.ID,
+		Name:             data.Filename,
+		Bytes:            data.Bytes,
+		Folder:           data.OriginalFilename,
+		Progress:         data.Progress,
+		Speed:            data.Speed,
+		Seeders:          data.Seeders,
+		Added:            data.Added,
+		Status:           data.Status,
+		Filename:         data.Filename,
+		OriginalFilename: data.OriginalFilename,
+		Links:            data.Links,
+		Debrid:           r.Name,
+		MountPath:        r.MountPath,
+	}
+	t.Files = getTorrentFiles(t, data) // Get selected files
+	return t, nil
+}
+
 func (r *RealDebrid) UpdateTorrent(t *types.Torrent) error {
 	url := fmt.Sprintf("%s/torrents/info/%s", r.Host, t.Id)
 	req, _ := http.NewRequest(http.MethodGet, url, nil)

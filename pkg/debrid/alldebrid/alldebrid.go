@@ -176,6 +176,48 @@ func flattenFiles(torrentId string, files []MagnetFile, parentPath string, index
 	return result
 }
 
+func (ad *AllDebrid) GetTorrent(torrentId string) (*types.Torrent, error) {
+	url := fmt.Sprintf("%s/magnet/status?id=%s", ad.Host, torrentId)
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	resp, err := ad.client.MakeRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	var res TorrentInfoResponse
+	err = json.Unmarshal(resp, &res)
+	if err != nil {
+		ad.logger.Info().Msgf("Error unmarshalling torrent info: %s", err)
+		return nil, err
+	}
+	data := res.Data.Magnets
+	status := getAlldebridStatus(data.StatusCode)
+	name := data.Filename
+	t := &types.Torrent{
+		Id:               strconv.Itoa(data.Id),
+		Name:             name,
+		Status:           status,
+		Filename:         name,
+		OriginalFilename: name,
+		Files:            make(map[string]types.File),
+		InfoHash:         data.Hash,
+		Debrid:           ad.Name,
+		MountPath:        ad.MountPath,
+		Added:            time.Unix(data.CompletionDate, 0).Format(time.RFC3339),
+	}
+	t.Bytes = data.Size
+	t.Seeders = data.Seeders
+	if status == "downloaded" {
+		t.Progress = 100
+		index := -1
+		files := flattenFiles(t.Id, data.Files, "", &index)
+		t.Files = files
+	} else {
+		t.Progress = float64(data.Downloaded) / float64(data.Size) * 100
+		t.Speed = data.DownloadSpeed
+	}
+	return t, nil
+}
+
 func (ad *AllDebrid) UpdateTorrent(t *types.Torrent) error {
 	url := fmt.Sprintf("%s/magnet/status?id=%s", ad.Host, t.Id)
 	req, _ := http.NewRequest(http.MethodGet, url, nil)
@@ -201,6 +243,7 @@ func (ad *AllDebrid) UpdateTorrent(t *types.Torrent) error {
 	t.Debrid = ad.Name
 	t.Bytes = data.Size
 	t.Seeders = data.Seeders
+	t.Added = time.Unix(data.CompletionDate, 0).Format(time.RFC3339)
 	if status == "downloaded" {
 		t.Progress = 100
 		index := -1
@@ -361,6 +404,7 @@ func (ad *AllDebrid) GetTorrents() ([]*types.Torrent, error) {
 			InfoHash:         magnet.Hash,
 			Debrid:           ad.Name,
 			MountPath:        ad.MountPath,
+			Added:            time.Unix(magnet.CompletionDate, 0).Format(time.RFC3339),
 		})
 	}
 
