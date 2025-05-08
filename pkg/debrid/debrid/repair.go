@@ -200,8 +200,9 @@ func (c *Cache) reInsertTorrent(ct *CachedTorrent) (*CachedTorrent, error) {
 		AddedOn:    addedOn,
 		IsComplete: len(newTorrent.Files) > 0,
 	}
-	c.setTorrent(ct)
-	c.RefreshListings(true)
+	c.setTorrent(ct, func(torrent *CachedTorrent) {
+		go c.RefreshListings(true)
+	})
 
 	// We can safely delete the old torrent here
 	if oldID != "" {

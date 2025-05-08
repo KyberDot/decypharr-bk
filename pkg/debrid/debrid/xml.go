@@ -6,7 +6,7 @@ import (
 	"github.com/sirrobot01/decypharr/internal/request"
 	"net/http"
 	"os"
-	path "path/filepath"
+	"path"
 	"time"
 )
 
@@ -60,17 +60,12 @@ func (c *Cache) refreshFolderXml(torrents []os.FileInfo, clientName, parent stri
 		return fmt.Errorf("failed to generate XML: %v", err)
 	}
 
-	// Store in cache
-	key0 := fmt.Sprintf("propfind:%s:0", baseUrl)
-	key1 := fmt.Sprintf("propfind:%s:1", baseUrl)
-
 	res := PropfindResponse{
 		Data:        xmlData,
 		GzippedData: request.Gzip(xmlData),
 		Ts:          time.Now(),
 	}
-	c.PropfindResp.Store(key0, res)
-	c.PropfindResp.Store(key1, res)
+	c.PropfindResp.Set(baseUrl, res)
 	return nil
 }
 
