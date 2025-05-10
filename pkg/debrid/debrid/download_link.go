@@ -8,6 +8,13 @@ import (
 	"time"
 )
 
+type linkCache struct {
+	Id        string
+	link      string
+	accountId string
+	expiresAt time.Time
+}
+
 func (c *Cache) GetDownloadLink(torrentName, filename, fileLink string) (string, error) {
 	// Check link cache
 	if dl := c.checkDownloadLink(fileLink); dl != "" {
@@ -45,7 +52,6 @@ func (c *Cache) fetchDownloadLink(torrentName, filename, fileLink string) (strin
 		}
 		ct = newCt
 		file = ct.Files[filename]
-		c.logger.Debug().Str("name", ct.Name).Str("id", ct.Id).Msgf("Reinserted torrent")
 	}
 
 	c.logger.Trace().Msgf("Getting download link for %s(%s)", filename, file.Link)
@@ -58,7 +64,6 @@ func (c *Cache) fetchDownloadLink(torrentName, filename, fileLink string) (strin
 			}
 			ct = newCt
 			file = ct.Files[filename]
-			c.logger.Debug().Str("name", ct.Name).Str("id", ct.Id).Msgf("Reinserted torrent")
 			// Retry getting the download link
 			downloadLink, err = c.client.GetDownloadLink(ct.Torrent, &file)
 			if err != nil {
@@ -98,18 +103,18 @@ func (c *Cache) GenerateDownloadLinks(t *CachedTorrent) {
 }
 
 func (c *Cache) updateDownloadLink(dl *types.DownloadLink) {
-	c.downloadLinks.Store(dl.Link, downloadLinkCache{
+	c.downloadLinks.Store(dl.Link, linkCache{
 		Id:        dl.Id,
-		Link:      dl.DownloadLink,
-		ExpiresAt: time.Now().Add(c.autoExpiresLinksAfterDuration),
-		AccountId: dl.AccountId,
+		link:      dl.DownloadLink,
+		expiresAt: time.Now().Add(c.autoExpiresLinksAfterDuration),
+		accountId: dl.AccountId,
 	})
 }
 
 func (c *Cache) checkDownloadLink(link string) string {
 	if dl, ok := c.downloadLinks.Load(link); ok {
-		if dl.ExpiresAt.After(time.Now()) && !c.IsDownloadLinkInvalid(dl.Link) {
-			return dl.Link
+		if dl.expiresAt.After(time.Now()) && !c.IsDownloadLinkInvalid(dl.link) {
+			return dl.link
 		}
 	}
 	return ""
@@ -120,8 +125,8 @@ func (c *Cache) MarkDownloadLinkAsInvalid(link, downloadLink, reason string) {
 	// Remove the download api key from active
 	if reason == "bandwidth_exceeded" {
 		if dl, ok := c.downloadLinks.Load(link); ok {
-			if dl.AccountId != "" && dl.Link == downloadLink {
-				c.client.DisableAccount(dl.AccountId)
+			if dl.accountId != "" && dl.link == downloadLink {
+				c.client.DisableAccount(dl.accountId)
 			}
 		}
 	}

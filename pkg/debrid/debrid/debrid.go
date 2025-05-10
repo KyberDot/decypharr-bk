@@ -93,15 +93,13 @@ func ProcessTorrent(d *Engine, magnet *utils.Magnet, a *arr.Arr, isSymlink, over
 	if len(errs) == 0 {
 		return nil, fmt.Errorf("failed to process torrent: no clients available")
 	}
-	var errBuilder strings.Builder
-	errBuilder.WriteString("failed to process torrent:")
-
-	for _, e := range errs {
-		if e != nil {
-			errBuilder.WriteString("\n")
-			errBuilder.WriteString(e.Error())
+	if len(errs) == 1 {
+		return nil, fmt.Errorf("failed to process torrent: %w", errs[0])
+	} else {
+		errStrings := make([]string, 0, len(errs))
+		for _, err := range errs {
+			errStrings = append(errStrings, err.Error())
 		}
+		return nil, fmt.Errorf("failed to process torrent: %s", strings.Join(errStrings, ", "))
 	}
-
-	return nil, fmt.Errorf(errBuilder.String())
 }

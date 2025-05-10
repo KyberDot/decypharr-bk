@@ -69,6 +69,9 @@ nav:
       - Overview: features/index.md
       - Repair Worker: features/repair-worker.md
       - WebDAV: features/webdav.md
+  - Guides:
+      - Overview: guides/index.md
+      - Setting Up with Rclone: guides/rclone.md
   - Changelog: changelog.md
 
 

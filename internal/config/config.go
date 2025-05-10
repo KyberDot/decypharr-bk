@@ -119,19 +119,21 @@ func (c *Config) loadConfig() error {
 	file, err := os.ReadFile(c.JsonFile())
 	if err != nil {
 		if os.IsNotExist(err) {
+			fmt.Printf("Config file not found, creating a new one at %s\n", c.JsonFile())
 			// Create a default config file if it doesn't exist
 			if err := c.createConfig(c.Path); err != nil {
 				return fmt.Errorf("failed to create config file: %w", err)
 			}
-		} else {
-			return fmt.Errorf("error reading config file: %w", err)
+			return c.Save()
 		}
-	} else {
-		if err := json.Unmarshal(file, &c); err != nil {
-			return fmt.Errorf("error unmarshaling config: %w", err)
-		}
+		return fmt.Errorf("error reading config file: %w", err)
 	}
-	return c.Save()
+
+	if err := json.Unmarshal(file, &c); err != nil {
+		return fmt.Errorf("error unmarshaling config: %w", err)
+	}
+	c.setDefaults()
+	return nil
 }
 
 func validateDebrids(debrids []Debrid) error {
@@ -312,7 +314,7 @@ func (c *Config) updateDebrid(d Debrid) Debrid {
 	return d
 }
 
-func (c *Config) Save() error {
+func (c *Config) setDefaults() {
 	for i, debrid := range c.Debrids {
 		c.Debrids[i] = c.updateDebrid(debrid)
 	}
@@ -333,6 +335,12 @@ func (c *Config) Save() error {
 
 	// Load the auth file
 	c.Auth = c.GetAuth()
+}
+
+func (c *Config) Save() error {
+
+	c.setDefaults()
+
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err

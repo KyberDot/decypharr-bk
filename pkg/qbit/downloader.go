@@ -290,7 +290,7 @@ func (q *QBit) getTorrentPath(rclonePath string, debridTorrent *debridTypes.Torr
 }
 
 func (q *QBit) preCacheFile(name string, filePaths []string) error {
-	q.logger.Trace().Msgf("Pre-caching file: %s", name)
+	q.logger.Trace().Msgf("Pre-caching torrent: %s", name)
 	if len(filePaths) == 0 {
 		return fmt.Errorf("no file paths provided")
 	}
@@ -300,7 +300,11 @@ func (q *QBit) preCacheFile(name string, filePaths []string) error {
 
 			file, err := os.Open(f)
 			if err != nil {
-				return err
+				if os.IsNotExist(err) {
+					// File has probably been moved by arr, return silently
+					return nil
+				}
+				return fmt.Errorf("failed to open file: %s: %v", f, err)
 			}
 			defer file.Close()
 

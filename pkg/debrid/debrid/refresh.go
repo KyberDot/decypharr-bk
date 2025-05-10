@@ -1,15 +1,12 @@
 package debrid
 
 import (
-	"context"
 	"fmt"
-	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"io"
 	"net/http"
 	"os"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -31,35 +28,9 @@ func (fi *fileInfo) IsDir() bool        { return fi.isDir }
 func (fi *fileInfo) Sys() interface{}   { return nil }
 
 func (c *Cache) RefreshListings(refreshRclone bool) {
-	if c.listingRefreshMu.TryLock() {
-		defer c.listingRefreshMu.Unlock()
-	} else {
-		return
-	}
 	// Copy the torrents to a string|time map
-	torrentsTime := make(map[string]time.Time, c.torrentsNames.Size())
-	torrents := make([]string, 0, c.torrentsNames.Size())
-	c.torrentsNames.Range(func(name string, value *CachedTorrent) bool {
-		torrentsTime[name] = value.AddedOn
-		torrents = append(torrents, name)
-		return true
-	})
+	c.torrents.refreshListing() // refresh torrent listings
 
-	// Sort the torrents by name
-	sort.Strings(torrents)
-
-	files := make([]os.FileInfo, 0, len(torrents))
-	for _, t := range torrents {
-		files = append(files, &fileInfo{
-			name:    t,
-			size:    0,
-			mode:    0755 | os.ModeDir,
-			modTime: torrentsTime[t],
-			isDir:   true,
-		})
-	}
-	// Atomic store of the complete ready-to-use slice
-	c.listings.Store(files)
 	if err := c.refreshParentXml(); err != nil {
 		c.logger.Debug().Err(err).Msg("Failed to refresh XML")
 	}
@@ -98,19 +69,19 @@ func (c *Cache) refreshTorrents() {
 
 	// Let's implement deleting torrents removed from debrid
 	deletedTorrents := make([]string, 0)
-	c.torrents.Range(func(key string, _ string) bool {
-		if _, exists := currentTorrentIds[key]; !exists {
-			deletedTorrents = append(deletedTorrents, key)
+	for _, id := range c.torrents.getAllIDs() {
+		if _, exists := currentTorrentIds[id]; !exists {
+			deletedTorrents = append(deletedTorrents, id)
 		}
-		return true
-	})
+	}
 
 	// Validate the torrents are truly deleted, then remove them from the cache too
 	go c.validateAndDeleteTorrents(deletedTorrents)
 
 	newTorrents := make([]*types.Torrent, 0)
+	cachedIdsMaps := c.torrents.getIdMaps()
 	for _, t := range debTorrents {
-		if _, exists := c.torrents.Load(t.Id); !exists {
+		if _, exists := cachedIdsMaps[t.Id]; !exists {
 			newTorrents = append(newTorrents, t)
 		}
 	}
@@ -144,13 +115,13 @@ func (c *Cache) refreshTorrents() {
 	close(workChan)
 	wg.Wait()
 
-	c.RefreshListings(true)
+	c.listingDebouncer.Call(true)
 
 	c.logger.Debug().Msgf("Processed %d new torrents", counter)
 }
 
 func (c *Cache) refreshRclone() error {
-	cfg := config.Get().WebDav
+	cfg := c.config
 
 	if cfg.RcUrl == "" {
 		return nil
@@ -160,9 +131,8 @@ func (c *Cache) refreshRclone() error {
 		return nil
 	}
 
-	// Create an optimized HTTP client
 	client := &http.Client{
-		Timeout: 5 * time.Second,
+		Timeout: 10 * time.Second,
 		Transport: &http.Transport{
 			MaxIdleConns:        10,
 			IdleConnTimeout:     30 * time.Second,
@@ -184,11 +154,6 @@ func (c *Cache) refreshRclone() error {
 		if cfg.RcUser != "" && cfg.RcPass != "" {
 			req.SetBasicAuth(cfg.RcUser, cfg.RcPass)
 		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		req = req.WithContext(ctx)
 		resp, err := client.Do(req)
 		if err != nil {
 			return err
@@ -196,12 +161,10 @@ func (c *Cache) refreshRclone() error {
 		defer resp.Body.Close()
 
 		if resp.StatusCode != 200 {
-			// Only read a limited amount of the body on error
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 			return fmt.Errorf("failed to perform %s: %s - %s", endpoint, resp.Status, string(body))
 		}
 
-		// Discard response body to reuse connection
 		_, _ = io.Copy(io.Discard, resp.Body)
 		return nil
 	}
@@ -232,7 +195,7 @@ func (c *Cache) refreshTorrent(torrentId string) *CachedTorrent {
 		IsComplete: len(torrent.Files) > 0,
 	}
 	c.setTorrent(ct, func(torrent *CachedTorrent) {
-		go c.RefreshListings(false)
+		c.listingDebouncer.Call(true)
 	})
 
 	return ct
@@ -253,11 +216,11 @@ func (c *Cache) refreshDownloadLinks() {
 		// if link is generated in the last 24 hours, add it to cache
 		timeSince := time.Since(v.Generated)
 		if timeSince < c.autoExpiresLinksAfterDuration {
-			c.downloadLinks.Store(k, downloadLinkCache{
+			c.downloadLinks.Store(k, linkCache{
 				Id:        v.Id,
-				AccountId: v.AccountId,
-				Link:      v.DownloadLink,
-				ExpiresAt: v.Generated.Add(c.autoExpiresLinksAfterDuration - timeSince),
+				accountId: v.AccountId,
+				link:      v.DownloadLink,
+				expiresAt: v.Generated.Add(c.autoExpiresLinksAfterDuration - timeSince),
 			})
 		} else {
 			c.downloadLinks.Delete(k)

@@ -3,7 +3,6 @@ package debrid
 import (
 	"errors"
 	"fmt"
-	"github.com/puzpuzpuz/xsync/v3"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/request"
 	"github.com/sirrobot01/decypharr/internal/utils"
@@ -184,7 +183,7 @@ func (c *Cache) reInsertTorrent(ct *CachedTorrent) (*CachedTorrent, error) {
 	}
 
 	// Update the torrent in the cache
-	addedOn, err := time.Parse(time.RFC3339, torrent.Added)
+	addedOn, err := time.Parse(time.RFC3339, newTorrent.Added)
 	if err != nil {
 		addedOn = time.Now()
 	}
@@ -201,7 +200,7 @@ func (c *Cache) reInsertTorrent(ct *CachedTorrent) (*CachedTorrent, error) {
 		IsComplete: len(newTorrent.Files) > 0,
 	}
 	c.setTorrent(ct, func(torrent *CachedTorrent) {
-		go c.RefreshListings(true)
+		c.listingDebouncer.Call(true)
 	})
 
 	// We can safely delete the old torrent here
@@ -214,11 +213,13 @@ func (c *Cache) reInsertTorrent(ct *CachedTorrent) (*CachedTorrent, error) {
 	req.Complete(ct, err)
 	c.failedToReinsert.Delete(oldID) // Delete the old torrent from the failed list
 
+	c.logger.Debug().Str("torrentId", torrent.Id).Msg("Torrent successfully reinserted")
+
 	return ct, nil
 }
 
 func (c *Cache) resetInvalidLinks() {
-	c.invalidDownloadLinks = xsync.NewMapOf[string, string]()
+	c.invalidDownloadLinks = sync.Map{}
 	c.client.ResetActiveDownloadKeys() // Reset the active download keys
 	c.failedToReinsert = sync.Map{}    // Reset the failed to reinsert map
 }

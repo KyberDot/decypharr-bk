@@ -182,7 +182,7 @@ func startServices(ctx context.Context) error {
 		safeGo(func() error {
 			err := svc.Repair.Start(ctx)
 			if err != nil {
-				_log.Error().Err(err).Msg("Error during repair")
+				_log.Error().Err(err).Msg("Error starting repair")
 			}
 			return nil // Not propagating repair errors to terminate the app
 		})

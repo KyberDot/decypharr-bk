@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/go-co-op/gocron/v2"
+	"github.com/robfig/cron/v3"
 	"strconv"
 	"strings"
 	"time"
@@ -40,14 +41,17 @@ func convertToJD(interval string) (gocron.JobDefinition, error) {
 		return gocron.DailyJob(1, gocron.NewAtTimes(
 			gocron.NewAtTime(uint(t.Hour()), uint(t.Minute()), uint(t.Second())),
 		)), nil
-	} else {
-		dur, err := time.ParseDuration(interval)
-		if err != nil {
-			return jd, fmt.Errorf("failed to parse duration: %w", err)
-		}
-		jd = gocron.DurationJob(dur)
 	}
-	return jd, nil
+
+	if _, err := cron.ParseStandard(interval); err == nil {
+		return gocron.CronJob(interval, false), nil
+	}
+
+	if dur, err := time.ParseDuration(interval); err == nil {
+		return gocron.DurationJob(dur), nil
+	}
+
+	return jd, fmt.Errorf("invalid interval format: %s", interval)
 }
 
 func parseClockTime(s string) (time.Time, bool) {

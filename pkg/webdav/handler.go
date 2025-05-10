@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -30,6 +31,8 @@ type Handler struct {
 	logger   zerolog.Logger
 	cache    *debrid.Cache
 	RootPath string
+
+	gzipPool sync.Pool
 }
 
 func NewHandler(name string, cache *debrid.Cache, logger zerolog.Logger) *Handler {
@@ -284,11 +287,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		handler.ServeHTTP(responseRecorder, r)
 		responseData := responseRecorder.Body.Bytes()
-		gzippedData := request.Gzip(responseData)
+		gzippedData := request.Gzip(responseData, &h.gzipPool)
 
 		// Create compressed version
 
-		h.cache.PropfindResp.Set(cleanPath, debrid.PropfindResponse{
+		h.cache.PropfindResp.Store(cleanPath, debrid.PropfindResponse{
 			Data:        responseData,
 			GzippedData: gzippedData,
 			Ts:          time.Now(),
@@ -338,7 +341,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if file, ok := fRaw.(*File); ok {
+		// Checks if the file is a torrent file
+		// .content is nil if the file is a torrent file
+		// .content means file is preloaded, e.g version.txt
+		if file, ok := fRaw.(*File); ok && file.content == nil {
 			link, err := file.getDownloadLink()
 			if err != nil {
 				h.logger.Trace().
@@ -450,7 +456,7 @@ func (h *Handler) isParentPath(urlPath string) bool {
 }
 
 func (h *Handler) serveFromCacheIfValid(w http.ResponseWriter, r *http.Request, urlPath string) bool {
-	respCache, ok := h.cache.PropfindResp.Get(urlPath)
+	respCache, ok := h.cache.PropfindResp.Load(urlPath)
 	if !ok {
 		return false
 	}
@@ -458,7 +464,7 @@ func (h *Handler) serveFromCacheIfValid(w http.ResponseWriter, r *http.Request, 
 	ttl := h.getCacheTTL(urlPath)
 
 	if time.Since(respCache.Ts) >= ttl {
-		h.cache.PropfindResp.Remove(urlPath)
+		h.cache.PropfindResp.Delete(urlPath)
 		return false
 	}
 	w.Header().Set("Content-Type", "application/xml; charset=utf-8")

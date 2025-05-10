@@ -2,10 +2,12 @@ package debrid
 
 import (
 	"bufio"
+	"bytes"
 	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"github.com/puzpuzpuz/xsync/v4"
 	"os"
 	"path"
 	"path/filepath"
@@ -17,7 +19,6 @@ import (
 
 	"github.com/go-co-op/gocron/v2"
 	"github.com/goccy/go-json"
-	"github.com/puzpuzpuz/xsync/v3"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/logger"
@@ -43,13 +44,6 @@ type CachedTorrent struct {
 	DuplicateIds []string  `json:"duplicate_ids"`
 }
 
-type downloadLinkCache struct {
-	Id        string
-	Link      string
-	AccountId string
-	ExpiresAt time.Time
-}
-
 type RepairType string
 
 const (
@@ -64,19 +58,27 @@ type RepairRequest struct {
 	FileName  string
 }
 
+type PropfindResponse struct {
+	Data        []byte
+	GzippedData []byte
+	Ts          time.Time
+}
+
 type Cache struct {
 	dir    string
 	client types.Client
 	logger zerolog.Logger
 
-	torrents             *xsync.MapOf[string, string]         // key: torrent.Id, value: {torrent_folder_name}
-	torrentsNames        *xsync.MapOf[string, *CachedTorrent] // key: torrent.Name, value: torrent
-	listings             atomic.Value
-	downloadLinks        *xsync.MapOf[string, downloadLinkCache]
-	invalidDownloadLinks *xsync.MapOf[string, string]
-	PropfindResp         *PropfindCache
+	torrents             *torrentCache
+	downloadLinks        *xsync.Map[string, linkCache]
+	invalidDownloadLinks sync.Map
+	PropfindResp         *xsync.Map[string, PropfindResponse]
 	folderNaming         WebDavFolderNaming
 
+	// optimizers
+	xmlPool          sync.Pool
+	gzipPool         sync.Pool
+	listingDebouncer *utils.Debouncer[bool]
 	// monitors
 	repairRequest    sync.Map
 	failedToReinsert sync.Map
@@ -91,7 +93,6 @@ type Cache struct {
 	autoExpiresLinksAfterDuration time.Duration
 
 	// refresh mutex
-	listingRefreshMu       sync.RWMutex // for refreshing torrents
 	downloadLinksRefreshMu sync.RWMutex // for refreshing download links
 	torrentsRefreshMu      sync.RWMutex // for refreshing torrents
 
@@ -99,6 +100,8 @@ type Cache struct {
 
 	saveSemaphore chan struct{}
 	ctx           context.Context
+
+	config config.Debrid
 }
 
 func New(dc config.Debrid, client types.Client) *Cache {
@@ -110,16 +113,15 @@ func New(dc config.Debrid, client types.Client) *Cache {
 	if autoExpiresLinksAfter == 0 || err != nil {
 		autoExpiresLinksAfter = 48 * time.Hour
 	}
-	return &Cache{
-		dir:                           filepath.Join(cfg.Path, "cache", dc.Name), // path to save cache files
-		torrents:                      xsync.NewMapOf[string, string](),
-		torrentsNames:                 xsync.NewMapOf[string, *CachedTorrent](),
-		invalidDownloadLinks:          xsync.NewMapOf[string, string](),
-		PropfindResp:                  NewPropfindCache(),
+	c := &Cache{
+		dir: filepath.Join(cfg.Path, "cache", dc.Name), // path to save cache files
+
+		torrents:                      newTorrentCache(),
+		PropfindResp:                  xsync.NewMap[string, PropfindResponse](),
 		client:                        client,
 		logger:                        logger.New(fmt.Sprintf("%s-webdav", client.GetName())),
 		workers:                       dc.Workers,
-		downloadLinks:                 xsync.NewMapOf[string, downloadLinkCache](),
+		downloadLinks:                 xsync.NewMap[string, linkCache](),
 		torrentRefreshInterval:        dc.TorrentsRefreshInterval,
 		downloadLinksRefreshInterval:  dc.DownloadLinksRefreshInterval,
 		folderNaming:                  WebDavFolderNaming(dc.FolderNaming),
@@ -127,7 +129,18 @@ func New(dc config.Debrid, client types.Client) *Cache {
 		saveSemaphore:                 make(chan struct{}, 50),
 		ctx:                           context.Background(),
 		scheduler:                     s,
+
+		config: dc,
+		xmlPool: sync.Pool{
+			New: func() interface{} {
+				return new(bytes.Buffer)
+			},
+		},
 	}
+	c.listingDebouncer = utils.NewDebouncer[bool](100*time.Millisecond, func(refreshRclone bool) {
+		c.RefreshListings(refreshRclone)
+	})
+	return c
 }
 
 func (c *Cache) Start(ctx context.Context) error {
@@ -311,7 +324,7 @@ func (c *Cache) Sync() error {
 
 	// Write these torrents to the cache
 	c.setTorrents(cachedTorrents, func() {
-		go c.RefreshListings(false)
+		c.listingDebouncer.Call(false)
 	}) // This is set to false, cos it's likely rclone hs not started yet.
 	c.logger.Info().Msgf("Loaded %d torrents from cache", len(cachedTorrents))
 
@@ -382,7 +395,7 @@ func (c *Cache) sync(torrents []*types.Torrent) error {
 	// Wait for all workers to complete
 	wg.Wait()
 
-	c.RefreshListings(true) // final refresh
+	c.listingDebouncer.Call(false) // final refresh
 	c.logger.Info().Msgf("Sync complete: %d torrents processed, %d errors", len(torrents), errorCount)
 	return nil
 }
@@ -407,21 +420,23 @@ func (c *Cache) GetTorrentFolder(torrent *types.Torrent) string {
 }
 
 func (c *Cache) setTorrent(t *CachedTorrent, callback func(torrent *CachedTorrent)) {
-	torrentKey := c.GetTorrentFolder(t.Torrent)
-	c.torrents.Store(t.Id, torrentKey) // Store the torrent id with the folder name(we might change the id after,  hence why it's stored here)
-	if o, ok := c.torrentsNames.Load(torrentKey); ok && o.Id != t.Id {
+	torrentName := c.GetTorrentFolder(t.Torrent)
+	torrentId := t.Id
+	if o, ok := c.torrents.getByName(torrentName); ok && o.Id != t.Id {
 		// If another torrent with the same name exists, merge the files, if the same file exists,
 		// keep the one with the most recent added date
 
 		// Save the most recent torrent
 		mergedFiles := mergeFiles(t, o) // Useful for merging files across multiple torrents, while keeping the most recent
+
 		if o.AddedOn.After(t.AddedOn) {
+			// Swap the new torrent to "become" the old one
 			t = o
 		}
 		t.Files = mergedFiles
 
 	}
-	c.torrentsNames.Store(torrentKey, t)
+	c.torrents.set(torrentId, torrentName, t)
 	c.SaveTorrent(t)
 	if callback != nil {
 		callback(t)
@@ -430,9 +445,9 @@ func (c *Cache) setTorrent(t *CachedTorrent, callback func(torrent *CachedTorren
 
 func (c *Cache) setTorrents(torrents map[string]*CachedTorrent, callback func()) {
 	for _, t := range torrents {
-		torrentKey := c.GetTorrentFolder(t.Torrent)
-		c.torrents.Store(t.Id, torrentKey)
-		if o, ok := c.torrentsNames.Load(torrentKey); ok && o.Id != t.Id {
+		torrentName := c.GetTorrentFolder(t.Torrent)
+		torrentId := t.Id
+		if o, ok := c.torrents.getByName(torrentName); ok && o.Id != t.Id {
 			// Save the most recent torrent
 			mergedFiles := mergeFiles(t, o) // Useful for merging files across multiple torrents, while keeping the most recent
 			if o.AddedOn.After(t.AddedOn) {
@@ -440,7 +455,7 @@ func (c *Cache) setTorrents(torrents map[string]*CachedTorrent, callback func())
 			}
 			t.Files = mergedFiles
 		}
-		c.torrentsNames.Store(torrentKey, t)
+		c.torrents.set(torrentId, torrentName, t)
 	}
 	c.SaveTorrents()
 	if callback != nil {
@@ -448,11 +463,9 @@ func (c *Cache) setTorrents(torrents map[string]*CachedTorrent, callback func())
 	}
 }
 
+// GetListing returns a sorted list of torrents(READ-ONLY)
 func (c *Cache) GetListing() []os.FileInfo {
-	if v, ok := c.listings.Load().([]os.FileInfo); ok {
-		return v
-	}
-	return nil
+	return c.torrents.getListing()
 }
 
 func (c *Cache) Close() error {
@@ -460,36 +473,28 @@ func (c *Cache) Close() error {
 }
 
 func (c *Cache) GetTorrents() map[string]*CachedTorrent {
-	torrents := make(map[string]*CachedTorrent)
-	c.torrentsNames.Range(func(key string, value *CachedTorrent) bool {
-		torrents[key] = value
-		return true
-	})
-	return torrents
+	return c.torrents.getAll()
 }
 
 func (c *Cache) GetTorrentByName(name string) *CachedTorrent {
-	if t, ok := c.torrentsNames.Load(name); ok {
-		return t
+	if torrent, ok := c.torrents.getByName(name); ok {
+		return torrent
 	}
 	return nil
 }
 
 func (c *Cache) GetTorrent(torrentId string) *CachedTorrent {
-	if name, ok := c.torrents.Load(torrentId); ok {
-		if t, ok := c.torrentsNames.Load(name); ok {
-			return t
-		}
-		return nil
+	if torrent, ok := c.torrents.getByID(torrentId); ok {
+		return torrent
 	}
 	return nil
 }
 
 func (c *Cache) SaveTorrents() {
-	c.torrentsNames.Range(func(key string, value *CachedTorrent) bool {
-		c.SaveTorrent(value)
-		return true
-	})
+	torrents := c.torrents.getAll()
+	for _, torrent := range torrents {
+		c.SaveTorrent(torrent)
+	}
 }
 
 func (c *Cache) SaveTorrent(ct *CachedTorrent) {
@@ -618,7 +623,7 @@ func (c *Cache) AddTorrent(t *types.Torrent) error {
 		AddedOn:    addedOn,
 	}
 	c.setTorrent(ct, func(tor *CachedTorrent) {
-		go c.RefreshListings(true)
+		c.listingDebouncer.Call(true)
 	})
 	go c.GenerateDownloadLinks(ct)
 	return nil
@@ -634,7 +639,7 @@ func (c *Cache) DeleteTorrent(id string) error {
 	defer c.torrentsRefreshMu.Unlock()
 
 	if c.deleteTorrent(id, true) {
-		c.RefreshListings(true)
+		c.listingDebouncer.Call(true)
 		c.logger.Trace().Msgf("Torrent %s deleted successfully", id)
 		return nil
 	}
@@ -654,15 +659,15 @@ func (c *Cache) validateAndDeleteTorrents(torrents []string) {
 		}(torrent)
 	}
 	wg.Wait()
-	c.RefreshListings(true)
+	c.listingDebouncer.Call(true)
 }
 
 // deleteTorrent deletes the torrent from the cache and debrid service
 // It also handles torrents with the same name but different IDs
 func (c *Cache) deleteTorrent(id string, removeFromDebrid bool) bool {
 
-	if torrentName, ok := c.torrents.Load(id); ok {
-		c.torrents.Delete(id) // Delete id from cache
+	if torrentName, ok := c.torrents.getByIDName(id); ok {
+		c.torrents.removeId(id) // Delete id from cache
 		defer func() {
 			c.removeFromDB(id)
 			if removeFromDebrid {
@@ -670,7 +675,7 @@ func (c *Cache) deleteTorrent(id string, removeFromDebrid bool) bool {
 			}
 		}() // defer delete from debrid
 
-		if t, ok := c.torrentsNames.Load(torrentName); ok {
+		if t, ok := c.torrents.getByName(torrentName); ok {
 
 			newFiles := map[string]types.File{}
 			newId := ""
@@ -684,7 +689,7 @@ func (c *Cache) deleteTorrent(id string, removeFromDebrid bool) bool {
 			}
 			if len(newFiles) == 0 {
 				// Delete the torrent since no files are left
-				c.torrentsNames.Delete(torrentName)
+				c.torrents.remove(torrentName)
 			} else {
 				t.Files = newFiles
 				newId = cmp.Or(newId, t.Id)
@@ -702,7 +707,7 @@ func (c *Cache) DeleteTorrents(ids []string) {
 	for _, id := range ids {
 		_ = c.deleteTorrent(id, true)
 	}
-	c.RefreshListings(true)
+	c.listingDebouncer.Call(true)
 }
 
 func (c *Cache) removeFromDB(torrentId string) {

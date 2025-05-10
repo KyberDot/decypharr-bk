@@ -258,7 +258,7 @@
                                 <div class="col-md-4 mb-3">
                                     <label class="form-label" for="repair.interval">Interval</label>
                                     <input type="text" class="form-control" name="repair.interval" id="repair.interval" placeholder="e.g., 24h">
-                                    <small class="form-text text-muted">Interval for the repair process(e.g., 24h, 1d, 03:00)</small>
+                                    <small class="form-text text-muted">Interval for the repair process(e.g., 24h, 1d, 03:00, or a crontab)</small>
                                 </div>
                                 <div class="col-md-5 mb-3">
                                     <label class="form-label" for="repair.zurg_url">Zurg URL</label>
@@ -846,10 +846,10 @@
                 navigator.registerProtocolHandler(
                     'magnet',
                     `${window.location.origin}/download?magnet=%s`,
-                    'DecyphArr'
+                    'Decypharr'
                 );
                 localStorage.setItem('magnetHandler', 'true');
-                document.getElementById('registerMagnetLink').innerText = '✅ DecyphArr Can Open Magnet Links';
+                document.getElementById('registerMagnetLink').innerText = '✅ Decypharr Can Open Magnet Links';
                 document.getElementById('registerMagnetLink').classList.add('bg-white', 'text-black');
                 console.log('Registered magnet link handler successfully.');
             } catch (error) {
@@ -860,7 +860,7 @@
 
     var magnetHandler = localStorage.getItem('magnetHandler');
     if (magnetHandler === 'true') {
-        document.getElementById('registerMagnetLink').innerText = '✅ DecyphArr Can Open Magnet Links';
+        document.getElementById('registerMagnetLink').innerText = '✅ Decypharr Can Open Magnet Links';
         document.getElementById('registerMagnetLink').classList.add('bg-white', 'text-black');
     }
 </script>
