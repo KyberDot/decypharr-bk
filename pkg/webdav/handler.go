@@ -119,7 +119,7 @@ func (h *Handler) getChildren(name string) []os.FileInfo {
 	if name[0] != '/' {
 		name = "/" + name
 	}
-	name = utils.UnescapePath(path.Clean(name))
+	name = utils.PathUnescape(path.Clean(name))
 	root := path.Clean(h.getRootPath())
 
 	// top‐level “parents” (e.g. __all__, torrents)
@@ -133,9 +133,8 @@ func (h *Handler) getChildren(name string) []os.FileInfo {
 	// torrent-folder level (e.g. /root/parentFolder/torrentName)
 	rel := strings.TrimPrefix(name, root+string(os.PathSeparator))
 	parts := strings.Split(rel, string(os.PathSeparator))
-	parent, _ := url.PathUnescape(parts[0])
-	if len(parts) == 2 && utils.Contains(h.getParentItems(), parent) {
-		torrentName := utils.UnescapePath(parts[1])
+	if len(parts) == 2 && utils.Contains(h.getParentItems(), parts[0]) {
+		torrentName := parts[1]
 		if t := h.cache.GetTorrentByName(torrentName); t != nil {
 			return h.getFileInfos(t.Torrent)
 		}
@@ -147,7 +146,7 @@ func (h *Handler) OpenFile(ctx context.Context, name string, flag int, perm os.F
 	if !strings.HasPrefix(name, "/") {
 		name = "/" + name
 	}
-	name = utils.UnescapePath(path.Clean(name))
+	name = utils.PathUnescape(path.Clean(name))
 	rootDir := path.Clean(h.getRootPath())
 	metadataOnly := ctx.Value("metadataOnly") != nil
 	now := time.Now()
@@ -188,9 +187,8 @@ func (h *Handler) OpenFile(ctx context.Context, name string, flag int, perm os.F
 	rel := strings.TrimPrefix(name, rootDir+string(os.PathSeparator))
 	parts := strings.Split(rel, string(os.PathSeparator))
 	if len(parts) >= 2 {
-		parent, _ := url.PathUnescape(parts[0])
-		if utils.Contains(h.getParentItems(), parent) {
-			torrentName := utils.UnescapePath(parts[1])
+		if utils.Contains(h.getParentItems(), parts[0]) {
+			torrentName := parts[1]
 			cached := h.cache.GetTorrentByName(torrentName)
 			if cached != nil && len(parts) >= 3 {
 				filename := filepath.Join(parts[2:]...)

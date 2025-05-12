@@ -159,7 +159,7 @@ func (q *QBit) createSymlinksWebdav(debridTorrent *debridTypes.Torrent, rclonePa
 
 	remainingFiles := make(map[string]debridTypes.File)
 	for _, file := range files {
-		remainingFiles[utils.EscapePath(file.Name)] = file
+		remainingFiles[file.Name] = file
 	}
 
 	ticker := time.NewTicker(100 * time.Millisecond)

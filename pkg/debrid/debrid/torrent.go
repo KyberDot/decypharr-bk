@@ -27,7 +27,7 @@ const (
 
 	filterBySizeGT string = "size_gt"
 	filterBySizeLT string = "size_lt"
-	
+
 	filterBLastAdded string = "last_added"
 )
 
@@ -47,7 +47,7 @@ type torrentCache struct {
 	folderListing      map[string][]os.FileInfo
 	folderListingMu    sync.RWMutex
 	directoriesFilters map[string][]directoryFilter
-	sortNeeded         bool
+	sortNeeded         atomic.Bool
 }
 
 type sortableFile struct {
@@ -62,10 +62,10 @@ func newTorrentCache(dirFilters map[string][]directoryFilter) *torrentCache {
 		byID:               make(map[string]string),
 		byName:             make(map[string]*CachedTorrent),
 		folderListing:      make(map[string][]os.FileInfo),
-		sortNeeded:         false,
 		directoriesFilters: dirFilters,
 	}
 
+	tc.sortNeeded.Store(false)
 	tc.listing.Store(make([]os.FileInfo, 0))
 	return tc
 }
@@ -100,12 +100,12 @@ func (tc *torrentCache) set(id, name string, torrent *CachedTorrent) {
 	defer tc.mu.Unlock()
 	tc.byID[id] = name
 	tc.byName[name] = torrent
-	tc.sortNeeded = true
+	tc.sortNeeded.Store(true)
 }
 
 func (tc *torrentCache) getListing() []os.FileInfo {
 	// Fast path: if we have a sorted list and no changes since last sort
-	if !tc.sortNeeded {
+	if !tc.sortNeeded.Load() {
 		return tc.listing.Load().([]os.FileInfo)
 	}
 
@@ -134,7 +134,7 @@ func (tc *torrentCache) refreshListing() {
 	for name, t := range tc.byName {
 		all = append(all, sortableFile{name, t.AddedOn, t.Size})
 	}
-	tc.sortNeeded = false
+	tc.sortNeeded.Store(false)
 	tc.mu.Unlock()
 
 	sort.Slice(all, func(i, j int) bool {
@@ -261,12 +261,12 @@ func (tc *torrentCache) removeId(id string) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
 	delete(tc.byID, id)
-	tc.sortNeeded = true
+	tc.sortNeeded.Store(true)
 }
 
 func (tc *torrentCache) remove(name string) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
 	delete(tc.byName, name)
-	tc.sortNeeded = true
+	tc.sortNeeded.Store(true)
 }

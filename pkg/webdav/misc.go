@@ -38,3 +38,31 @@ func (h *Handler) getCacheTTL(urlPath string) time.Duration {
 	}
 	return 2 * time.Minute // Longer TTL for other paths
 }
+
+var pctHex = "0123456789ABCDEF"
+
+// fastEscapePath returns a percent-encoded path, preserving '/'
+// and only encoding bytes outside the unreserved set:
+//
+//	ALPHA / DIGIT / '-' / '_' / '.' / '~' / '/'
+func fastEscapePath(p string) string {
+	var b strings.Builder
+
+	for i := 0; i < len(p); i++ {
+		c := p[i]
+		// unreserved (plus '/')
+		if (c >= 'a' && c <= 'z') ||
+			(c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') ||
+			c == '-' || c == '_' ||
+			c == '.' || c == '~' ||
+			c == '/' {
+			b.WriteByte(c)
+		} else {
+			b.WriteByte('%')
+			b.WriteByte(pctHex[c>>4])
+			b.WriteByte(pctHex[c&0xF])
+		}
+	}
+	return b.String()
+}
