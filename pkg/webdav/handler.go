@@ -444,7 +444,7 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request) {
 	if file, ok := fRaw.(*File); ok && file.content == nil {
 		link, err := file.getDownloadLink()
 		if err != nil {
-			h.logger.Error().
+			h.logger.Debug().
 				Err(err).
 				Str("path", r.URL.Path).
 				Msg("Could not fetch download link")
