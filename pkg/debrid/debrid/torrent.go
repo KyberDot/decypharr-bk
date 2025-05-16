@@ -143,7 +143,7 @@ func (tc *torrentCache) refreshListing() {
 	go func() {
 		listing := make([]os.FileInfo, len(all))
 		for i, sf := range all {
-			listing[i] = &fileInfo{sf.name, sf.size, 0755 | os.ModeDir, sf.modTime, true}
+			listing[i] = &fileInfo{sf.id, sf.name, sf.size, 0755 | os.ModeDir, sf.modTime, true}
 		}
 		tc.listing.Store(listing)
 	}()
@@ -156,7 +156,8 @@ func (tc *torrentCache) refreshListing() {
 		for _, sf := range all {
 			if sf.bad {
 				listing = append(listing, &fileInfo{
-					name:    fmt.Sprintf("%s(%s)", sf.name, sf.id),
+					id:      sf.id,
+					name:    fmt.Sprintf("%s || %s", sf.name, sf.id),
 					size:    sf.size,
 					mode:    0755 | os.ModeDir,
 					modTime: sf.modTime,
@@ -183,6 +184,7 @@ func (tc *torrentCache) refreshListing() {
 			for _, sf := range all {
 				if tc.torrentMatchDirectory(filters, sf, now) {
 					matched = append(matched, &fileInfo{
+						id:   sf.id,
 						name: sf.name, size: sf.size,
 						mode: 0755 | os.ModeDir, modTime: sf.modTime, isDir: true,
 					})

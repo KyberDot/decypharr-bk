@@ -650,8 +650,7 @@ func (c *Cache) DeleteTorrent(id string) error {
 	defer c.torrentsRefreshMu.Unlock()
 
 	if c.deleteTorrent(id, true) {
-		c.listingDebouncer.Call(true)
-		c.logger.Trace().Msgf("Torrent %s deleted successfully", id)
+		go c.RefreshListings(true)
 		return nil
 	}
 	return nil

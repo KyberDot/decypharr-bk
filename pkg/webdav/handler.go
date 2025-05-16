@@ -258,25 +258,27 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "PROPFIND":
 		h.handlePropfind(w, r)
 		return
-
-	default:
-		handler := &webdav.Handler{
-			FileSystem: h,
-			LockSystem: webdav.NewMemLS(),
-			Logger: func(r *http.Request, err error) {
-				if err != nil {
-					h.logger.Trace().
-						Err(err).
-						Str("method", r.Method).
-						Str("path", r.URL.Path).
-						Msg("WebDAV error")
-				}
-			},
+	case "DELETE":
+		if err := h.handleDelete(w, r); err == nil {
+			return
 		}
-		handler.ServeHTTP(w, r)
-		return
-
+		// fallthrough to default
 	}
+	handler := &webdav.Handler{
+		FileSystem: h,
+		LockSystem: webdav.NewMemLS(),
+		Logger: func(r *http.Request, err error) {
+			if err != nil {
+				h.logger.Trace().
+					Err(err).
+					Str("method", r.Method).
+					Str("path", r.URL.Path).
+					Msg("WebDAV error")
+			}
+		},
+	}
+	handler.ServeHTTP(w, r)
+	return
 }
 
 func getContentType(fileName string) string {
@@ -458,4 +460,23 @@ func (h *Handler) handleOptions(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Allow", "OPTIONS, GET, HEAD, PUT, DELETE, MKCOL, COPY, MOVE, PROPFIND")
 	w.Header().Set("DAV", "1, 2")
 	w.WriteHeader(http.StatusOK)
+}
+
+// handleDelete deletes a torrent from using id
+func (h *Handler) handleDelete(w http.ResponseWriter, r *http.Request) error {
+	cleanPath := path.Clean(r.URL.Path) // Remove any leading slashes
+
+	_, torrentId := path.Split(cleanPath)
+	if torrentId == "" {
+		return os.ErrNotExist
+	}
+
+	cachedTorrent := h.cache.GetTorrent(torrentId)
+	if cachedTorrent == nil {
+		return os.ErrNotExist
+	}
+
+	h.cache.OnRemove(cachedTorrent.Id)
+	w.WriteHeader(http.StatusNoContent)
+	return nil
 }

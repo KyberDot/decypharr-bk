@@ -119,7 +119,8 @@
         {{- if and $.CanDelete }}
         <button
                 class="delete-btn"
-                data-path="{{printf "%s/%s" $.Path $file.Name}}">
+                data-name="{{$file.Name}}"
+                data-path="{{printf "%s/%s" $.Path $file.ID}}">
         Delete
         </button>
         {{- end}}
@@ -130,7 +131,7 @@
     document.querySelectorAll('.delete-btn').forEach(btn=>{
         btn.addEventListener('click', ()=>{
             let p = btn.getAttribute('data-path');
-            let name = p.split('/').pop();
+            let name = btn.getAttribute('data-name');
             if(!confirm('Delete '+name+'?')) return;
             fetch(p, { method: 'DELETE' })
                 .then(_=>location.reload());
