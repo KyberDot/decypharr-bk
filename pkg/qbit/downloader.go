@@ -105,7 +105,7 @@ func (q *QBit) downloadFiles(torrent *Torrent, parent string) {
 		go func(file debridTypes.File) {
 			defer wg.Done()
 			defer func() { <-q.downloadSemaphore }()
-			filename := file.Link
+			filename := file.Name
 
 			err := Download(
 				client,
