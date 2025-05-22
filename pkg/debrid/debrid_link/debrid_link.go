@@ -27,7 +27,8 @@ type DebridLink struct {
 
 	MountPath   string
 	logger      zerolog.Logger
-	CheckCached bool
+	checkCached bool
+	addSamples  bool
 }
 
 func (dl *DebridLink) GetName() string {
@@ -327,7 +328,7 @@ func (dl *DebridLink) GetDownloadingStatus() []string {
 }
 
 func (dl *DebridLink) GetCheckCached() bool {
-	return dl.CheckCached
+	return dl.checkCached
 }
 
 func (dl *DebridLink) GetDownloadUncached() bool {
@@ -367,7 +368,8 @@ func New(dc config.Debrid) *DebridLink {
 		client:           client,
 		MountPath:        dc.Folder,
 		logger:           logger.New(dc.Name),
-		CheckCached:      dc.CheckCached,
+		checkCached:      dc.CheckCached,
+		addSamples:       dc.AddSamples,
 	}
 }
 

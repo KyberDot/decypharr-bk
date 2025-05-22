@@ -2,7 +2,6 @@ package types
 
 import (
 	"fmt"
-	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/logger"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/arr"
@@ -86,26 +85,6 @@ type File struct {
 	DownloadLink *DownloadLink `json:"-"`
 	AccountId    string        `json:"account_id"`
 	Generated    time.Time     `json:"generated"`
-}
-
-func (f *File) IsValid() bool {
-	cfg := config.Get()
-	name := filepath.Base(f.Path)
-	if utils.IsSampleFile(f.Path) {
-		return false
-	}
-
-	if !cfg.IsAllowedFile(name) {
-		return false
-	}
-	if !cfg.IsSizeAllowed(f.Size) {
-		return false
-	}
-
-	if f.Link == "" {
-		return false
-	}
-	return true
 }
 
 func (t *Torrent) Cleanup(remove bool) {

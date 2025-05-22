@@ -341,21 +341,28 @@
         </div>
     </div>
     <div class="row">
-        <div class="col-md-4">
+        <div class="col-md-3">
              <div class="form-check me-3">
                 <input type="checkbox" class="form-check-input" name="debrid[${index}].download_uncached" id="debrid[${index}].download_uncached">
                 <label class="form-check-label" for="debrid[${index}].download_uncached">Download Uncached</label>
             </div>
             <small class="form-text text-muted">Download uncached files from the debrid service</small>
         </div>
-        <div class="col-md-4">
+        <div class="col-md-3">
             <div class="form-check me-3">
                 <input type="checkbox" class="form-check-input" name="debrid[${index}].check_cached" id="debrid[${index}].check_cached">
                 <label class="form-check-label" for="debrid[${index}].check_cached" disabled>Check Cached</label>
             </div>
             <small class="form-text text-muted">Check if the file is cached before downloading(Disabled)</small>
         </div>
-        <div class="col-md-4">
+        <div class="col-md-3">
+            <div class="form-check me-3">
+                <input type="checkbox" class="form-check-input addSamples" name="debrid[${index}].add_samples" id="debrid[${index}].add_samples">
+                <label class="form-check-label" for="debrid[${index}].add_samples">Add Samples</label>
+            </div>
+             <small class="form-text text-muted">Add samples, extras etc when adding torrent to debrid(disabled by default)</small>
+        </div>
+        <div class="col-md-3">
             <div class="form-check me-3">
                 <input type="checkbox" class="form-check-input useWebdav" name="debrid[${index}].use_webdav" id="debrid[${index}].use_webdav">
                 <label class="form-check-label" for="debrid[${index}].use_webdav">Enable WebDav Server</label>
@@ -1074,6 +1081,7 @@
                     rate_limit: document.querySelector(`[name="debrid[${i}].rate_limit"]`).value,
                     download_uncached: document.querySelector(`[name="debrid[${i}].download_uncached"]`).checked,
                     check_cached: document.querySelector(`[name="debrid[${i}].check_cached"]`).checked,
+                    add_samples: document.querySelector(`[name="debrid[${i}].add_samples"]`).checked,
                     use_webdav: document.querySelector(`[name="debrid[${i}].use_webdav"]`).checked
                 };
 

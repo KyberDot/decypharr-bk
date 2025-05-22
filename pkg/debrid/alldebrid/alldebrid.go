@@ -27,7 +27,8 @@ type AllDebrid struct {
 
 	MountPath   string
 	logger      zerolog.Logger
-	CheckCached bool
+	checkCached bool
+	addSamples  bool
 }
 
 func New(dc config.Debrid) *AllDebrid {
@@ -62,7 +63,8 @@ func New(dc config.Debrid) *AllDebrid {
 		client:           client,
 		MountPath:        dc.Folder,
 		logger:           logger.New(dc.Name),
-		CheckCached:      dc.CheckCached,
+		checkCached:      dc.CheckCached,
+		addSamples:       dc.AddSamples,
 	}
 }
 
@@ -120,7 +122,7 @@ func getAlldebridStatus(statusCode int) string {
 	}
 }
 
-func flattenFiles(torrentId string, files []MagnetFile, parentPath string, index *int) map[string]types.File {
+func (ad *AllDebrid) flattenFiles(torrentId string, files []MagnetFile, parentPath string, index *int) map[string]types.File {
 	result := make(map[string]types.File)
 
 	cfg := config.Get()
@@ -133,7 +135,7 @@ func flattenFiles(torrentId string, files []MagnetFile, parentPath string, index
 
 		if f.Elements != nil {
 			// This is a folder, recurse into it
-			subFiles := flattenFiles(torrentId, f.Elements, currentPath, index)
+			subFiles := ad.flattenFiles(torrentId, f.Elements, currentPath, index)
 			for k, v := range subFiles {
 				if _, ok := result[k]; ok {
 					// File already exists, use path as key
@@ -147,7 +149,7 @@ func flattenFiles(torrentId string, files []MagnetFile, parentPath string, index
 			fileName := filepath.Base(f.Name)
 
 			// Skip sample files
-			if utils.IsSampleFile(f.Name) {
+			if !ad.addSamples && utils.IsSampleFile(f.Name) {
 				continue
 			}
 			if !cfg.IsAllowedFile(fileName) {
@@ -207,7 +209,7 @@ func (ad *AllDebrid) GetTorrent(torrentId string) (*types.Torrent, error) {
 	if status == "downloaded" {
 		t.Progress = 100
 		index := -1
-		files := flattenFiles(t.Id, data.Files, "", &index)
+		files := ad.flattenFiles(t.Id, data.Files, "", &index)
 		t.Files = files
 	} else {
 		t.Progress = float64(data.Downloaded) / float64(data.Size) * 100
@@ -245,7 +247,7 @@ func (ad *AllDebrid) UpdateTorrent(t *types.Torrent) error {
 	if status == "downloaded" {
 		t.Progress = 100
 		index := -1
-		files := flattenFiles(t.Id, data.Files, "", &index)
+		files := ad.flattenFiles(t.Id, data.Files, "", &index)
 		t.Files = files
 	} else {
 		t.Progress = float64(data.Downloaded) / float64(data.Size) * 100
@@ -373,7 +375,7 @@ func (ad *AllDebrid) GetDownloadLink(t *types.Torrent, file *types.File) (*types
 }
 
 func (ad *AllDebrid) GetCheckCached() bool {
-	return ad.CheckCached
+	return ad.checkCached
 }
 
 func (ad *AllDebrid) GetTorrents() ([]*types.Torrent, error) {

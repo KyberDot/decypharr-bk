@@ -37,7 +37,8 @@ type RealDebrid struct {
 
 	MountPath   string
 	logger      zerolog.Logger
-	CheckCached bool
+	checkCached bool
+	addSamples  bool
 }
 
 func New(dc config.Debrid) *RealDebrid {
@@ -87,7 +88,8 @@ func New(dc config.Debrid) *RealDebrid {
 		currentDownloadKey: currentDownloadKey,
 		MountPath:          dc.Folder,
 		logger:             logger.New(dc.Name),
-		CheckCached:        dc.CheckCached,
+		checkCached:        dc.CheckCached,
+		addSamples:         dc.AddSamples,
 	}
 }
 
@@ -128,14 +130,14 @@ func getSelectedFiles(t *types.Torrent, data torrentInfo) map[string]types.File 
 // getTorrentFiles returns a list of torrent files from the torrent info
 // validate is used to determine if the files should be validated
 // if validate is false, selected files will be returned
-func getTorrentFiles(t *types.Torrent, data torrentInfo) map[string]types.File {
+func (r *RealDebrid) getTorrentFiles(t *types.Torrent, data torrentInfo) map[string]types.File {
 	files := make(map[string]types.File)
 	cfg := config.Get()
 	idx := 0
 
 	for _, f := range data.Files {
 		name := filepath.Base(f.Path)
-		if utils.IsSampleFile(f.Path) {
+		if !r.addSamples && utils.IsSampleFile(f.Path) {
 			// Skip sample files
 			continue
 		}
@@ -296,7 +298,7 @@ func (r *RealDebrid) GetTorrent(torrentId string) (*types.Torrent, error) {
 		Debrid:           r.Name,
 		MountPath:        r.MountPath,
 	}
-	t.Files = getTorrentFiles(t, data) // Get selected files
+	t.Files = r.getTorrentFiles(t, data) // Get selected files
 	return t, nil
 }
 
@@ -367,7 +369,7 @@ func (r *RealDebrid) CheckStatus(t *types.Torrent, isSymlink bool) (*types.Torre
 		t.Debrid = r.Name
 		t.MountPath = r.MountPath
 		if status == "waiting_files_selection" {
-			t.Files = getTorrentFiles(t, data)
+			t.Files = r.getTorrentFiles(t, data)
 			if len(t.Files) == 0 {
 				return t, fmt.Errorf("no video files found")
 			}
@@ -581,7 +583,7 @@ func (r *RealDebrid) GetDownloadLink(t *types.Torrent, file *types.File) (*types
 }
 
 func (r *RealDebrid) GetCheckCached() bool {
-	return r.CheckCached
+	return r.checkCached
 }
 
 func (r *RealDebrid) getTorrents(offset int, limit int) (int, []*types.Torrent, error) {
