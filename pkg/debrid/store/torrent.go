@@ -96,8 +96,8 @@ func newTorrentCache(dirFilters map[string][]directoryFilter) *torrentCache {
 func (tc *torrentCache) reset() {
 	tc.mu.Lock()
 	tc.torrents = tc.torrents[:0]       // Clear the slice
-	tc.idIndex = make(map[string]int)   // Reset the ID index
-	tc.nameIndex = make(map[string]int) // Reset the name index
+	tc.idIndex = make(map[string]int)   // Stop the ID index
+	tc.nameIndex = make(map[string]int) // Stop the name index
 	tc.deletedCount.Store(0)
 	tc.mu.Unlock()
 

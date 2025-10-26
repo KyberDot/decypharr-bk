@@ -132,6 +132,40 @@ type Rclone struct {
 	LogLevel string `json:"log_level,omitempty"`
 }
 
+type DFS struct {
+	// Core settings
+	Enabled              bool   `json:"enabled,omitempty"`
+	MountPath            string `json:"mount_path,omitempty"`             // Base mount path, providers will be mounted as subfolders
+	CacheExpiry          string `json:"cache_expiry,omitempty"`           // 1h, 30m etc
+	CacheDir             string `json:"cache_dir,omitempty"`              // /tmp/decypharr-cache
+	DiskCacheSize        string `json:"disk_cache_size,omitempty"`        // 10GB, 50GB etc
+	CacheCleanupInterval string `json:"cache_cleanup_interval,omitempty"` // 10m, 1h etc
+	// Performance settings
+
+	ChunkSize          string `json:"chunk_size,omitempty"`           // 1MB, 4MB etc
+	ReadAheadSize      string `json:"read_ahead_size,omitempty"`      // Read ahead size. e.g default to 16MB
+	MaxConcurrentReads int    `json:"max_concurrent_reads,omitempty"` // Maximum concurrent read operations
+
+	DaemonTimeout string `json:"daemon_timeout,omitempty"` // Time after which the FUSE daemon will exit if idle
+
+	// File system settings
+	UID                uint32 `json:"uid,omitempty"`                 // User ID for mounted files
+	GID                uint32 `json:"gid,omitempty"`                 // Group ID for mounted files
+	Umask              string `json:"umask,omitempty"`               // File permissions mask
+	AllowOther         bool   `json:"allow_other,omitempty"`         // Allow other users to access mount
+	AllowRoot          bool   `json:"allow_root,omitempty"`          // Allow root user to access mount
+	DefaultPermissions bool   `json:"default_permissions,omitempty"` // Enable permission checking
+	AsyncRead          bool   `json:"async_read,omitempty"`          // Enable asynchronous reads
+
+	// Advanced settings
+	AttrTimeout     string `json:"attr_timeout,omitempty"`     // Attribute cache timeout
+	EntryTimeout    string `json:"entry_timeout,omitempty"`    // Directory entry cache timeout
+	NegativeTimeout string `json:"negative_timeout,omitempty"` // Negative lookup cache timeout
+
+	// Health and monitoring
+	StatsInterval string `json:"stats_interval,omitempty"` // How often to log stats
+}
+
 type Config struct {
 	// server
 	BindAddress string `json:"bind_address,omitempty"`
@@ -145,6 +179,7 @@ type Config struct {
 	Repair             Repair      `json:"repair,omitempty"`
 	WebDav             WebDav      `json:"webdav,omitempty"`
 	Rclone             Rclone      `json:"rclone,omitempty"`
+	Dfs                DFS         `json:"dfs,omitempty"`
 	AllowedExt         []string    `json:"allowed_file_types,omitempty"`
 	MinFileSize        string      `json:"min_file_size,omitempty"` // Minimum file size to download, 10MB, 1GB, etc
 	MaxFileSize        string      `json:"max_file_size,omitempty"` // Maximum file size to download (0 means no limit)
@@ -470,6 +505,15 @@ func (c *Config) setDefaults() {
 				// Save the updated auth config
 				_ = c.SaveAuth(c.Auth)
 			}
+		}
+	}
+
+	if c.Dfs.Enabled {
+		if c.Dfs.MountPath == "" {
+			c.Dfs.MountPath = filepath.Join(c.Path, "mount")
+		}
+		if c.Dfs.CacheDir == "" {
+			c.Dfs.CacheDir = filepath.Join(c.Path, "fs", "cache")
 		}
 	}
 }

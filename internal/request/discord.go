@@ -94,7 +94,7 @@ func SendDiscordMessage(event string, status string, message string) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		bodyBytes, _ := io.ReadAll(resp.Body)
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		return fmt.Errorf("discord returned error status code: %s, body: %s", resp.Status, string(bodyBytes))
 	}
 

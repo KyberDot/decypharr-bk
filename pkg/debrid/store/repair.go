@@ -43,7 +43,7 @@ func (c *Cache) markAsFailedToReinsert(torrentId string) {
 	if torrent, ok := c.torrents.getByID(torrentId); ok {
 		torrent.Bad = true
 		c.setTorrent(torrent, func(t CachedTorrent) {
-			c.RefreshListings(false)
+			c.TriggerRefreshEvent(false)
 		})
 	}
 }
@@ -56,7 +56,7 @@ func (c *Cache) markAsSuccessfullyReinserted(torrentId string) {
 	if torrent, ok := c.torrents.getByID(torrentId); ok {
 		torrent.Bad = false
 		c.setTorrent(torrent, func(torrent CachedTorrent) {
-			c.RefreshListings(false)
+			c.TriggerRefreshEvent(false)
 		})
 	}
 }
@@ -285,7 +285,7 @@ func (c *Cache) reInsertTorrent(ct *CachedTorrent) (*CachedTorrent, error) {
 		IsComplete: len(newTorrent.Files) > 0,
 	}
 	c.setTorrent(newCt, func(torrent CachedTorrent) {
-		c.RefreshListings(true)
+		c.TriggerRefreshEvent(true)
 	})
 
 	ct = &newCt // Update ct to point to the new torrent
@@ -308,7 +308,7 @@ func (c *Cache) reInsertTorrent(ct *CachedTorrent) (*CachedTorrent, error) {
 func (c *Cache) resetInvalidLinks(ctx context.Context) {
 	c.logger.Debug().Msgf("Resetting accounts")
 	c.invalidDownloadLinks = xsync.NewMap[string, string]()
-	c.client.AccountManager().Reset() // Reset the active download keys
+	c.client.AccountManager().Reset() // Stop the active download keys
 	// Refresh the download links
 	c.refreshDownloadLinks(ctx)
 }

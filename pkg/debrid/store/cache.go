@@ -20,7 +20,6 @@ import (
 
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/sirrobot01/decypharr/pkg/debrid/common"
-	"github.com/sirrobot01/decypharr/pkg/rclone"
 
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"golang.org/x/sync/singleflight"
@@ -83,8 +82,6 @@ type Cache struct {
 
 	torrents     *torrentCache
 	folderNaming WebDavFolderNaming
-
-	listingDebouncer *utils.Debouncer[bool]
 	// monitors
 	invalidDownloadLinks *xsync.Map[string, string]
 	repairRequest        *xsync.Map[string, *reInsertRequest]
@@ -113,12 +110,13 @@ type Cache struct {
 
 	config        config.Debrid
 	customFolders []string
-	mounter       *rclone.Mount
-	downloadSG    singleflight.Group
 	streamClient  *http.Client
+
+	event      *Event
+	downloadSG singleflight.Group
 }
 
-func NewDebridCache(dc config.Debrid, client common.Client, mounter *rclone.Mount) *Cache {
+func NewDebridCache(dc config.Debrid, client common.Client) *Cache {
 	cfg := config.Get()
 	cet, err := time.LoadLocation("CET")
 	if err != nil {
@@ -192,7 +190,6 @@ func NewDebridCache(dc config.Debrid, client common.Client, mounter *rclone.Moun
 
 		config:        dc,
 		customFolders: customFolders,
-		mounter:       mounter,
 
 		ready:                make(chan struct{}),
 		invalidDownloadLinks: xsync.NewMap[string, string](),
@@ -202,10 +199,6 @@ func NewDebridCache(dc config.Debrid, client common.Client, mounter *rclone.Moun
 		streamClient:         httpClient,
 		repairChan:           make(chan RepairRequest, 100), // Initialize the repair channel, max 100 requests buffered
 	}
-
-	c.listingDebouncer = utils.NewDebouncer[bool](100*time.Millisecond, func(refreshRclone bool) {
-		c.RefreshListings(refreshRclone)
-	})
 	return c
 }
 
@@ -217,54 +210,40 @@ func (c *Cache) StreamWithRclone() bool {
 	return c.config.ServeFromRclone
 }
 
-// Reset clears all internal state so the Cache can be reused without leaks.
+// Stop clears all internal state so the Cache can be reused without leaks.
 // Call this after stopping the old Cache (so no goroutines are holding references),
 // and before you discard the instance on a restart.
-func (c *Cache) Reset() {
+func (c *Cache) Stop() {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	err := c.TriggerStopEvent(ctx)
+	if err != nil {
+		c.logger.Error().Err(err).Msg("Failed to run OnStop event")
+	}
 
-	// Unmount first
-	if c.mounter != nil && c.mounter.IsMounted() {
-		if err := c.mounter.Unmount(); err != nil {
-			c.logger.Error().Err(err).Msgf("Failed to unmount %s", c.config.Name)
-		} else {
-			c.logger.Info().Msgf("Unmounted %s", c.config.Name)
-		}
+	if err := c.scheduler.StopJobs(); err != nil {
+		c.logger.Error().Err(err).Msg("Failed to stop scheduler jobs")
 	}
 
 	go func() {
-		// Shutdown the scheduler (this will stop all jobs)
 		if err := c.scheduler.Shutdown(); err != nil {
 			c.logger.Error().Err(err).Msg("Failed to stop scheduler")
 		}
 	}()
-	// Stop the listing debouncer
-	c.listingDebouncer.Stop()
 
 	// Close the repair channel
 	if c.repairChan != nil {
 		close(c.repairChan)
 	}
 
-	// 1. Reset torrent storage
 	c.torrents.reset()
 
-	// 3. Clear any sync.Maps
 	c.invalidDownloadLinks = xsync.NewMap[string, string]()
 	c.repairRequest = xsync.NewMap[string, *reInsertRequest]()
 	c.failedToReinsert = xsync.NewMap[string, struct{}]()
 
-	// 5. Rebuild the listing debouncer
-	c.listingDebouncer = utils.NewDebouncer[bool](
-		100*time.Millisecond,
-		func(refreshRclone bool) {
-			c.RefreshListings(refreshRclone)
-		},
-	)
-
-	// 6. Reset repair channel so the next Start() can spin it up
 	c.repairChan = make(chan RepairRequest, 100)
 
-	// Reset the ready channel
 	c.ready = make(chan struct{})
 }
 
@@ -291,15 +270,306 @@ func (c *Cache) Start(ctx context.Context) error {
 	addr := cfg.BindAddress + ":" + cfg.Port + cfg.URLBase + "webdav/" + name + "/"
 	c.logger.Info().Msgf("%s WebDav server running at %s", name, addr)
 
-	if c.mounter != nil {
-		if err := c.mounter.Mount(ctx); err != nil {
-			c.logger.Error().Err(err).Msgf("Failed to mount %s", c.config.Name)
-		}
-	} else {
-		c.logger.Warn().Msgf("Mounting is disabled for %s", c.config.Name)
+	// trigger the start event
+	if err := c.TriggerStartEvent(ctx); err != nil {
+		c.logger.Error().Err(err).Msg("Failed to start mount")
 	}
 	return nil
 }
+
+func (c *Cache) Sync(ctx context.Context) error {
+	cachedTorrents, err := c.load(ctx)
+	if err != nil {
+		c.logger.Error().Err(err).Msg("Failed to load cache")
+	}
+
+	torrents, err := c.client.GetTorrents()
+	if err != nil {
+		return fmt.Errorf("failed to sync torrents: %v", err)
+	}
+
+	totalTorrents := len(torrents)
+
+	c.logger.Info().Msgf("%d torrents found from %s", totalTorrents, c.client.Name())
+
+	newTorrents := make([]*types.Torrent, 0)
+	idStore := make(map[string]struct{}, totalTorrents)
+	for _, t := range torrents {
+		idStore[t.Id] = struct{}{}
+		if _, ok := cachedTorrents[t.Id]; !ok {
+			newTorrents = append(newTorrents, t)
+		}
+	}
+
+	// Check for deleted torrents
+	deletedTorrents := make([]string, 0)
+	for _, t := range cachedTorrents {
+		if _, ok := idStore[t.Id]; !ok {
+			deletedTorrents = append(deletedTorrents, t.Id)
+		}
+	}
+
+	if len(deletedTorrents) > 0 {
+		c.logger.Info().Msgf("Found %d deleted torrents", len(deletedTorrents))
+		for _, id := range deletedTorrents {
+			// Remove from cache and debrid service
+			delete(cachedTorrents, id)
+			// Remove the json file from disk
+			c.removeFile(id, false)
+
+		}
+	}
+
+	// Write these torrents to the cache
+	c.setTorrents(cachedTorrents, func() {
+		c.TriggerRefreshEvent(false)
+	}) // Initial calls
+	c.logger.Info().Msgf("Loaded %d torrents from cache", len(cachedTorrents))
+
+	if len(newTorrents) > 0 {
+		c.logger.Info().Msgf("Found %d new torrents", len(newTorrents))
+		if err := c.sync(ctx, newTorrents); err != nil {
+			return fmt.Errorf("failed to sync torrents: %v", err)
+		}
+	}
+
+	return nil
+}
+
+func (c *Cache) GetTorrentFolder(torrent *types.Torrent) string {
+	switch c.folderNaming {
+	case WebDavUseFileName:
+		return path.Clean(torrent.Filename)
+	case WebDavUseOriginalName:
+		return path.Clean(torrent.OriginalFilename)
+	case WebDavUseFileNameNoExt:
+		return path.Clean(utils.RemoveExtension(torrent.Filename))
+	case WebDavUseOriginalNameNoExt:
+		return path.Clean(utils.RemoveExtension(torrent.OriginalFilename))
+	case WebDavUseID:
+		return torrent.Id
+	case WebdavUseHash:
+		return strings.ToLower(torrent.InfoHash)
+	default:
+		return path.Clean(torrent.Filename)
+	}
+}
+
+// GetListing returns a sorted list of torrents(READ-ONLY)
+func (c *Cache) GetListing(folder string) []os.FileInfo {
+	switch folder {
+	case "__all__", "torrents":
+		return c.torrents.getListing()
+	default:
+		return c.torrents.getFolderListing(folder)
+	}
+}
+
+func (c *Cache) GetCustomFolders() []string {
+	return c.customFolders
+}
+
+func (c *Cache) Close() error {
+	return nil
+}
+
+func (c *Cache) GetTorrents() map[string]CachedTorrent {
+	return c.torrents.getAll()
+}
+
+func (c *Cache) TotalTorrents() int {
+	return c.torrents.getAllCount()
+}
+
+func (c *Cache) GetTorrentByName(name string) *CachedTorrent {
+	if torrent, ok := c.torrents.getByName(name); ok {
+		return &torrent
+	}
+	return nil
+}
+
+func (c *Cache) GetTorrentsName() map[string]CachedTorrent {
+	return c.torrents.getAllByName()
+}
+
+func (c *Cache) GetTorrent(torrentId string) *CachedTorrent {
+	if torrent, ok := c.torrents.getByID(torrentId); ok {
+		return &torrent
+	}
+	return nil
+}
+
+func (c *Cache) SaveTorrents() {
+	torrents := c.torrents.getAll()
+	for _, torrent := range torrents {
+		c.SaveTorrent(torrent)
+	}
+}
+
+func (c *Cache) SaveTorrent(ct CachedTorrent) {
+	marshaled, err := json.MarshalIndent(ct, "", "  ")
+	if err != nil {
+		c.logger.Error().Err(err).Msgf("Failed to marshal torrent: %s", ct.Id)
+		return
+	}
+
+	// Store just the essential info needed for the file operation
+	saveInfo := struct {
+		id       string
+		jsonData []byte
+	}{
+		id:       ct.Torrent.Id,
+		jsonData: marshaled,
+	}
+
+	// Try to acquire semaphore without blocking
+	select {
+	case c.saveSemaphore <- struct{}{}:
+		go func() {
+			defer func() { <-c.saveSemaphore }()
+			c.saveTorrent(saveInfo.id, saveInfo.jsonData)
+		}()
+	default:
+		c.saveTorrent(saveInfo.id, saveInfo.jsonData)
+	}
+}
+
+func (c *Cache) RemoveTorrent(torrentId string) {
+	err := c.DeleteTorrent(torrentId)
+	if err != nil {
+		c.logger.Error().Err(err).Msgf("Failed to delete torrent: %s", torrentId)
+		return
+	}
+}
+
+// RemoveFile removes a file from the torrent cache
+func (c *Cache) RemoveFile(torrentName string, filename string) error {
+	c.logger.Debug().Str("torrent", torrentName).Msgf("Removing file %s", filename)
+	torrent, ok := c.torrents.getByName(torrentName)
+	if !ok {
+		return fmt.Errorf("torrent %s not found", torrentName)
+	}
+	file, ok := torrent.GetFile(filename)
+	if !ok {
+		return fmt.Errorf("file %s not found in torrent %s", filename, torrentName)
+	}
+	file.Deleted = true
+	torrent.Files[filename] = file
+
+	// If the torrent has no files left, delete it
+	if len(torrent.GetFiles()) == 0 {
+		c.logger.Debug().Msgf("Torrent %s has no files left, deleting it", torrent.Id)
+		if err := c.DeleteTorrent(torrent.Id); err != nil {
+			return fmt.Errorf("failed to delete torrent %s: %w", torrent.Id, err)
+		}
+		return nil
+	}
+
+	c.setTorrent(torrent, func(torrent CachedTorrent) {
+		c.TriggerRefreshEvent(true)
+	}) // Update the torrent in the cache
+	return nil
+}
+
+func (c *Cache) Logger() zerolog.Logger {
+	return c.logger
+}
+
+func (c *Cache) GetConfig() config.Debrid {
+	return c.config
+}
+
+func (c *Cache) DeleteTorrents(ids []string) {
+	c.logger.Info().Msgf("Deleting %d torrents", len(ids))
+	for _, id := range ids {
+		_ = c.deleteTorrent(id, true)
+	}
+	c.TriggerRefreshEvent(true)
+}
+
+func (c *Cache) ProcessTorrent(t *types.Torrent) error {
+
+	isComplete := func(files map[string]types.File) bool {
+		_complete := len(files) > 0
+		for _, file := range files {
+			if file.Link == "" {
+				_complete = false
+				break
+			}
+		}
+		return _complete
+	}
+
+	if !isComplete(t.Files) {
+		if err := c.client.UpdateTorrent(t); err != nil {
+			return fmt.Errorf("failed to update torrent: %w", err)
+		}
+	}
+
+	if !isComplete(t.Files) {
+		c.logger.Debug().
+			Str("torrent_id", t.Id).
+			Str("torrent_name", t.Name).
+			Int("total_files", len(t.Files)).
+			Msg("Torrent still not complete after refresh, marking as bad")
+	} else {
+
+		addedOn, err := time.Parse(time.RFC3339, t.Added)
+		if err != nil {
+			addedOn = time.Now()
+		}
+		ct := CachedTorrent{
+			Torrent:    t,
+			IsComplete: len(t.Files) > 0,
+			AddedOn:    addedOn,
+		}
+		c.setTorrent(ct, nil) // Only set the torrent. caller handles refresh
+	}
+	return nil
+}
+
+func (c *Cache) Add(t *types.Torrent) error {
+	if len(t.Files) == 0 {
+		c.logger.Warn().Msgf("Torrent %s has no files to add. Refreshing", t.Id)
+		if err := c.client.UpdateTorrent(t); err != nil {
+			return fmt.Errorf("failed to update torrent: %w", err)
+		}
+	}
+	addedOn, err := time.Parse(time.RFC3339, t.Added)
+	if err != nil {
+		addedOn = time.Now()
+	}
+	ct := CachedTorrent{
+		Torrent:    t,
+		IsComplete: len(t.Files) > 0,
+		AddedOn:    addedOn,
+	}
+	c.setTorrent(ct, func(tor CachedTorrent) {
+		c.TriggerRefreshEvent(true)
+	})
+	go c.GetFileDownloadLinks(ct)
+	return nil
+
+}
+
+func (c *Cache) Client() common.Client {
+	return c.client
+}
+
+func (c *Cache) DeleteTorrent(id string) error {
+	c.torrentsRefreshMu.Lock()
+	defer c.torrentsRefreshMu.Unlock()
+
+	if c.deleteTorrent(id, true) {
+		go func() {
+			c.TriggerRefreshEvent(true)
+		}()
+		return nil
+	}
+	return nil
+}
+
+// utils
 
 func (c *Cache) load(ctx context.Context) (map[string]CachedTorrent, error) {
 	mu := sync.Mutex{}
@@ -408,65 +678,6 @@ func (c *Cache) load(ctx context.Context) (map[string]CachedTorrent, error) {
 	return torrents, nil
 }
 
-func (c *Cache) Sync(ctx context.Context) error {
-	cachedTorrents, err := c.load(ctx)
-	if err != nil {
-		c.logger.Error().Err(err).Msg("Failed to load cache")
-	}
-
-	torrents, err := c.client.GetTorrents()
-	if err != nil {
-		return fmt.Errorf("failed to sync torrents: %v", err)
-	}
-
-	totalTorrents := len(torrents)
-
-	c.logger.Info().Msgf("%d torrents found from %s", totalTorrents, c.client.Name())
-
-	newTorrents := make([]*types.Torrent, 0)
-	idStore := make(map[string]struct{}, totalTorrents)
-	for _, t := range torrents {
-		idStore[t.Id] = struct{}{}
-		if _, ok := cachedTorrents[t.Id]; !ok {
-			newTorrents = append(newTorrents, t)
-		}
-	}
-
-	// Check for deleted torrents
-	deletedTorrents := make([]string, 0)
-	for _, t := range cachedTorrents {
-		if _, ok := idStore[t.Id]; !ok {
-			deletedTorrents = append(deletedTorrents, t.Id)
-		}
-	}
-
-	if len(deletedTorrents) > 0 {
-		c.logger.Info().Msgf("Found %d deleted torrents", len(deletedTorrents))
-		for _, id := range deletedTorrents {
-			// Remove from cache and debrid service
-			delete(cachedTorrents, id)
-			// Remove the json file from disk
-			c.removeFile(id, false)
-
-		}
-	}
-
-	// Write these torrents to the cache
-	c.setTorrents(cachedTorrents, func() {
-		c.listingDebouncer.Call(false)
-	}) // Initial calls
-	c.logger.Info().Msgf("Loaded %d torrents from cache", len(cachedTorrents))
-
-	if len(newTorrents) > 0 {
-		c.logger.Info().Msgf("Found %d new torrents", len(newTorrents))
-		if err := c.sync(ctx, newTorrents); err != nil {
-			return fmt.Errorf("failed to sync torrents: %v", err)
-		}
-	}
-
-	return nil
-}
-
 func (c *Cache) sync(ctx context.Context, torrents []*types.Torrent) error {
 
 	// Create channels with appropriate buffering
@@ -524,28 +735,9 @@ func (c *Cache) sync(ctx context.Context, torrents []*types.Torrent) error {
 	// Wait for all workers to complete
 	wg.Wait()
 
-	c.listingDebouncer.Call(false) // final refresh
+	c.TriggerRefreshEvent(false) // final refresh
 	c.logger.Info().Msgf("Sync complete: %d torrents processed, %d errors", len(torrents), errorCount)
 	return nil
-}
-
-func (c *Cache) GetTorrentFolder(torrent *types.Torrent) string {
-	switch c.folderNaming {
-	case WebDavUseFileName:
-		return path.Clean(torrent.Filename)
-	case WebDavUseOriginalName:
-		return path.Clean(torrent.OriginalFilename)
-	case WebDavUseFileNameNoExt:
-		return path.Clean(utils.RemoveExtension(torrent.Filename))
-	case WebDavUseOriginalNameNoExt:
-		return path.Clean(utils.RemoveExtension(torrent.OriginalFilename))
-	case WebDavUseID:
-		return torrent.Id
-	case WebdavUseHash:
-		return strings.ToLower(torrent.InfoHash)
-	default:
-		return path.Clean(torrent.Filename)
-	}
 }
 
 func (c *Cache) setTorrent(t CachedTorrent, callback func(torrent CachedTorrent)) {
@@ -580,85 +772,6 @@ func (c *Cache) setTorrents(torrents map[string]CachedTorrent, callback func()) 
 	c.SaveTorrents()
 	if callback != nil {
 		callback()
-	}
-}
-
-// GetListing returns a sorted list of torrents(READ-ONLY)
-func (c *Cache) GetListing(folder string) []os.FileInfo {
-	switch folder {
-	case "__all__", "torrents":
-		return c.torrents.getListing()
-	default:
-		return c.torrents.getFolderListing(folder)
-	}
-}
-
-func (c *Cache) GetCustomFolders() []string {
-	return c.customFolders
-}
-
-func (c *Cache) Close() error {
-	return nil
-}
-
-func (c *Cache) GetTorrents() map[string]CachedTorrent {
-	return c.torrents.getAll()
-}
-
-func (c *Cache) TotalTorrents() int {
-	return c.torrents.getAllCount()
-}
-
-func (c *Cache) GetTorrentByName(name string) *CachedTorrent {
-	if torrent, ok := c.torrents.getByName(name); ok {
-		return &torrent
-	}
-	return nil
-}
-
-func (c *Cache) GetTorrentsName() map[string]CachedTorrent {
-	return c.torrents.getAllByName()
-}
-
-func (c *Cache) GetTorrent(torrentId string) *CachedTorrent {
-	if torrent, ok := c.torrents.getByID(torrentId); ok {
-		return &torrent
-	}
-	return nil
-}
-
-func (c *Cache) SaveTorrents() {
-	torrents := c.torrents.getAll()
-	for _, torrent := range torrents {
-		c.SaveTorrent(torrent)
-	}
-}
-
-func (c *Cache) SaveTorrent(ct CachedTorrent) {
-	marshaled, err := json.MarshalIndent(ct, "", "  ")
-	if err != nil {
-		c.logger.Error().Err(err).Msgf("Failed to marshal torrent: %s", ct.Id)
-		return
-	}
-
-	// Store just the essential info needed for the file operation
-	saveInfo := struct {
-		id       string
-		jsonData []byte
-	}{
-		id:       ct.Torrent.Id,
-		jsonData: marshaled,
-	}
-
-	// Try to acquire semaphore without blocking
-	select {
-	case c.saveSemaphore <- struct{}{}:
-		go func() {
-			defer func() { <-c.saveSemaphore }()
-			c.saveTorrent(saveInfo.id, saveInfo.jsonData)
-		}()
-	default:
-		c.saveTorrent(saveInfo.id, saveInfo.jsonData)
 	}
 }
 
@@ -708,88 +821,6 @@ func (c *Cache) saveTorrent(id string, data []byte) {
 	}
 }
 
-func (c *Cache) ProcessTorrent(t *types.Torrent) error {
-
-	isComplete := func(files map[string]types.File) bool {
-		_complete := len(files) > 0
-		for _, file := range files {
-			if file.Link == "" {
-				_complete = false
-				break
-			}
-		}
-		return _complete
-	}
-
-	if !isComplete(t.Files) {
-		if err := c.client.UpdateTorrent(t); err != nil {
-			return fmt.Errorf("failed to update torrent: %w", err)
-		}
-	}
-
-	if !isComplete(t.Files) {
-		c.logger.Debug().
-			Str("torrent_id", t.Id).
-			Str("torrent_name", t.Name).
-			Int("total_files", len(t.Files)).
-			Msg("Torrent still not complete after refresh, marking as bad")
-	} else {
-
-		addedOn, err := time.Parse(time.RFC3339, t.Added)
-		if err != nil {
-			addedOn = time.Now()
-		}
-		ct := CachedTorrent{
-			Torrent:    t,
-			IsComplete: len(t.Files) > 0,
-			AddedOn:    addedOn,
-		}
-		c.setTorrent(ct, func(tor CachedTorrent) {
-			c.listingDebouncer.Call(false)
-		})
-	}
-	return nil
-}
-
-func (c *Cache) Add(t *types.Torrent) error {
-	if len(t.Files) == 0 {
-		c.logger.Warn().Msgf("Torrent %s has no files to add. Refreshing", t.Id)
-		if err := c.client.UpdateTorrent(t); err != nil {
-			return fmt.Errorf("failed to update torrent: %w", err)
-		}
-	}
-	addedOn, err := time.Parse(time.RFC3339, t.Added)
-	if err != nil {
-		addedOn = time.Now()
-	}
-	ct := CachedTorrent{
-		Torrent:    t,
-		IsComplete: len(t.Files) > 0,
-		AddedOn:    addedOn,
-	}
-	c.setTorrent(ct, func(tor CachedTorrent) {
-		c.RefreshListings(true)
-	})
-	go c.GetFileDownloadLinks(ct)
-	return nil
-
-}
-
-func (c *Cache) Client() common.Client {
-	return c.client
-}
-
-func (c *Cache) DeleteTorrent(id string) error {
-	c.torrentsRefreshMu.Lock()
-	defer c.torrentsRefreshMu.Unlock()
-
-	if c.deleteTorrent(id, true) {
-		go c.RefreshListings(true)
-		return nil
-	}
-	return nil
-}
-
 func (c *Cache) validateAndDeleteTorrents(torrents []string) {
 	wg := sync.WaitGroup{}
 	for _, torrent := range torrents {
@@ -803,7 +834,7 @@ func (c *Cache) validateAndDeleteTorrents(torrents []string) {
 		}(torrent)
 	}
 	wg.Wait()
-	c.listingDebouncer.Call(true)
+	c.TriggerRefreshEvent(true)
 }
 
 // deleteTorrent deletes the torrent from the cache and debrid service
@@ -848,14 +879,6 @@ func (c *Cache) deleteTorrent(id string, removeFromDebrid bool) bool {
 	return false
 }
 
-func (c *Cache) DeleteTorrents(ids []string) {
-	c.logger.Info().Msgf("Deleting %d torrents", len(ids))
-	for _, id := range ids {
-		_ = c.deleteTorrent(id, true)
-	}
-	c.listingDebouncer.Call(true)
-}
-
 func (c *Cache) removeFile(torrentId string, moveToTrash bool) {
 	// Moves the torrent file to the trash
 	filePath := filepath.Join(c.dir, torrentId+".json")
@@ -881,51 +904,4 @@ func (c *Cache) removeFile(torrentId string, moveToTrash bool) {
 	if err := os.Rename(filePath, trashPath); err != nil {
 		return
 	}
-}
-
-func (c *Cache) OnRemove(torrentId string) {
-	c.logger.Debug().Msgf("OnRemove triggered for %s", torrentId)
-	err := c.DeleteTorrent(torrentId)
-	if err != nil {
-		c.logger.Error().Err(err).Msgf("Failed to delete torrent: %s", torrentId)
-		return
-	}
-}
-
-// RemoveFile removes a file from the torrent cache
-// TODO sends a re-insert that removes the file from debrid
-func (c *Cache) RemoveFile(torrentId string, filename string) error {
-	c.logger.Debug().Str("torrent_id", torrentId).Msgf("Removing file %s", filename)
-	torrent, ok := c.torrents.getByID(torrentId)
-	if !ok {
-		return fmt.Errorf("torrent %s not found", torrentId)
-	}
-	file, ok := torrent.GetFile(filename)
-	if !ok {
-		return fmt.Errorf("file %s not found in torrent %s", filename, torrentId)
-	}
-	file.Deleted = true
-	torrent.Files[filename] = file
-
-	// If the torrent has no files left, delete it
-	if len(torrent.GetFiles()) == 0 {
-		c.logger.Debug().Msgf("Torrent %s has no files left, deleting it", torrentId)
-		if err := c.DeleteTorrent(torrentId); err != nil {
-			return fmt.Errorf("failed to delete torrent %s: %w", torrentId, err)
-		}
-		return nil
-	}
-
-	c.setTorrent(torrent, func(torrent CachedTorrent) {
-		c.listingDebouncer.Call(true)
-	}) // Update the torrent in the cache
-	return nil
-}
-
-func (c *Cache) Logger() zerolog.Logger {
-	return c.logger
-}
-
-func (c *Cache) GetConfig() config.Debrid {
-	return c.config
 }

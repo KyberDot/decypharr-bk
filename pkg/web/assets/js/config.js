@@ -88,6 +88,9 @@ class ConfigManager {
         // Load rclone config
         this.populateRcloneSettings(config.rclone);
 
+        // Load DFS config
+        this.populateDFSSettings(config.dfs);
+
         // Load API token info
         this.populateAPIToken(config);
     }
@@ -163,6 +166,28 @@ class ConfigManager {
                     element.checked = rcloneConfig[field];
                 } else {
                     element.value = rcloneConfig[field];
+                }
+            }
+        });
+    }
+
+    populateDFSSettings(dfsConfig) {
+        if (!dfsConfig) return;
+
+        const fields = [
+            'enabled', 'mount_path', 'cache_dir', 'disk_cache_size', 'cache_expiry', 'cache_cleanup_interval',
+            'chunk_size', 'read_ahead_size', 'max_concurrent_reads', 'daemon_timeout',
+            'uid', 'gid', 'umask', 'allow_other', 'allow_root', 'default_permissions', 'async_read',
+            'attr_timeout', 'entry_timeout', 'negative_timeout'
+        ];
+
+        fields.forEach(field => {
+            const element = document.querySelector(`[name="dfs.${field}"]`);
+            if (element && dfsConfig[field] !== undefined) {
+                if (element.type === 'checkbox') {
+                    element.checked = dfsConfig[field];
+                } else {
+                    element.value = dfsConfig[field];
                 }
             }
         });
@@ -1053,6 +1078,15 @@ class ConfigManager {
             errors.push('Rclone mount path is required when Rclone is enabled');
         }
 
+        if (config.dfs.enabled && config.dfs.mount_path === '') {
+            errors.push('DFS mount path is required when DFS is enabled');
+        }
+
+        // Check that only one mount system is enabled at a time
+        if (config.dfs.enabled && config.rclone.enabled) {
+            errors.push('Cannot enable both DFS and Rclone mounts at the same time. Please enable only one.');
+        }
+
         return {
             valid: errors.length === 0,
             errors
@@ -1096,7 +1130,10 @@ class ConfigManager {
             repair: this.collectRepairConfig(),
 
             // Rclone configuration
-            rclone: this.collectRcloneConfig()
+            rclone: this.collectRcloneConfig(),
+
+            // DFS configuration
+            dfs: this.collectDFSConfig()
         };
     }
 
@@ -1230,7 +1267,7 @@ class ConfigManager {
         const getElementValue = (name, defaultValue = '') => {
             const element = document.querySelector(`[name="rclone.${name}"]`);
             if (!element) return defaultValue;
-            
+
             if (element.type === 'checkbox') {
                 return element.checked;
             } else if (element.type === 'number') {
@@ -1269,6 +1306,45 @@ class ConfigManager {
             no_modtime: getElementValue('no_modtime', false),
             no_checksum: getElementValue('no_checksum', false),
             log_level: getElementValue('log_level', 'INFO'),
+        };
+    }
+
+    collectDFSConfig() {
+        const getElementValue = (name, defaultValue = '') => {
+            const element = document.querySelector(`[name="dfs.${name}"]`);
+            if (!element) return defaultValue;
+
+            if (element.type === 'checkbox') {
+                return element.checked;
+            } else if (element.type === 'number') {
+                const val = parseInt(element.value);
+                return isNaN(val) ? 0 : val;
+            } else {
+                return element.value || defaultValue;
+            }
+        };
+
+        return {
+            enabled: getElementValue('enabled', false),
+            mount_path: getElementValue('mount_path'),
+            cache_dir: getElementValue('cache_dir'),
+            disk_cache_size: getElementValue('disk_cache_size'),
+            cache_expiry: getElementValue('cache_expiry'),
+            cache_cleanup_interval: getElementValue('cache_cleanup_interval'),
+            chunk_size: getElementValue('chunk_size'),
+            read_ahead_size: getElementValue('read_ahead_size'),
+            max_concurrent_reads: getElementValue('max_concurrent_reads', 0),
+            daemon_timeout: getElementValue('daemon_timeout'),
+            uid: getElementValue('uid', 0),
+            gid: getElementValue('gid', 0),
+            umask: getElementValue('umask'),
+            allow_other: getElementValue('allow_other', false),
+            allow_root: getElementValue('allow_root', false),
+            default_permissions: getElementValue('default_permissions', false),
+            async_read: getElementValue('async_read', false),
+            attr_timeout: getElementValue('attr_timeout'),
+            entry_timeout: getElementValue('entry_timeout'),
+            negative_timeout: getElementValue('negative_timeout')
         };
     }
 

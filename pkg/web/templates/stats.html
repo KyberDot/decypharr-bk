@@ -22,7 +22,15 @@
                 </h2>
             </div>
             <div class="card-body p-6 pt-3">
-                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
+                    <div class="stat">
+                        <div class="stat-figure text-primary">
+                            <i class="bi bi-clock-history text-2xl"></i>
+                        </div>
+                        <div class="stat-title">Uptime</div>
+                        <div class="stat-value text-primary" id="uptime">-</div>
+                        <div class="stat-desc" id="start-time">Started: -</div>
+                    </div>
                     <div class="stat">
                         <div class="stat-figure text-info">
                             <i class="bi bi-memory text-2xl"></i>
@@ -70,21 +78,30 @@
             </div>
         </div>
 
-        <div class="card bg-base-100 shadow-xl" id="rclone-card">
+        <div class="card bg-base-100 shadow-xl" id="mount-card">
             <div class="card-header p-6 pb-3">
                 <div class="card-title text-xl justify-between items-center">
                     <h2>
-                        <i class="bi bi-cloud-arrow-up text-primary"></i>
-                        Rclone Statistics
+                        <i class="bi bi-hdd-stack text-primary"></i>
+                        Mount Statistics
                     </h2>
-                    <a href="{{.URLBase}}debug/logs/rclone" class="btn btn-sm btn-outline" target="_blank">
-                        <i class="bi bi-arrow-right"></i>
-                        View Rclone Logs
-                    </a>
+                    <div class="flex gap-2">
+                        <a href="{{.URLBase}}debug/logs/rclone" class="btn btn-sm btn-outline" target="_blank" id="rclone-logs-btn">
+                            <i class="bi bi-arrow-right"></i>
+                            View Rclone Logs
+                        </a>
+                        <a href="{{.URLBase}}debug/logs/dfs" class="btn btn-sm btn-outline" target="_blank" id="dfs-logs-btn" style="display: none;">
+                            <i class="bi bi-arrow-right"></i>
+                            View DFS Logs
+                        </a>
+                    </div>
                 </div>
-                <div class="badge" id="rclone-status">Unknown</div>
+                <div class="flex gap-2">
+                    <div class="badge" id="mount-type">Unknown</div>
+                    <div class="badge" id="mount-status">Unknown</div>
+                </div>
             </div>
-            <div class="card-body p-6 pt-3" id="rclone-content">
+            <div class="card-body p-6 pt-3" id="mount-content">
             </div>
         </div>
     </div>
@@ -130,28 +147,141 @@
             loadingEl.style.display = 'block';
         }
 
-        function updateRcloneStats(rclone) {
-            const rcloneCard = document.getElementById('rclone-card');
-            const rcloneStatus = document.getElementById('rclone-status');
-            const rcloneContent = document.getElementById('rclone-content');
+        function updateMountStats(mountData) {
+            const mountCard = document.getElementById('mount-card');
+            const mountType = document.getElementById('mount-type');
+            const mountStatus = document.getElementById('mount-status');
+            const mountContent = document.getElementById('mount-content');
+            const rcloneLogsBtn = document.getElementById('rclone-logs-btn');
+            const dfsLogsBtn = document.getElementById('dfs-logs-btn');
 
-            if (!rclone || !rclone.enabled) {
-                rcloneStatus.textContent = 'Disabled';
-                rcloneStatus.className = 'badge badge-error';
-                rcloneContent.innerHTML = '<p class="text-base-content/70">Rclone is not enabled or configured.</p>';
+            // Determine mount type (rclone, dfs, or external)
+            let type = 'None';
+
+            if (mountData && mountData.type === "rclone" && mountData.enabled) {
+                type = 'Rclone';
+                rcloneLogsBtn.style.display = 'inline-flex';
+                dfsLogsBtn.style.display = 'none';
+            } else if (mountData && mountData.type === "dfs" && mountData.enabled) {
+                type = 'DFS';
+                rcloneLogsBtn.style.display = 'none';
+                dfsLogsBtn.style.display = 'inline-flex';
+            } else if (mountData && mountData.type === "external") {
+                type = 'External';
+                rcloneLogsBtn.style.display = 'inline-flex';
+                dfsLogsBtn.style.display = 'none';
+            }
+
+            mountType.textContent = type;
+            mountType.className = type !== 'None' ? 'badge badge-info' : 'badge badge-ghost';
+
+            if (!mountData || type === 'None') {
+                mountStatus.textContent = 'Disabled';
+                mountStatus.className = 'badge badge-error';
+                mountContent.innerHTML = '<p class="text-base-content/70">No mount system is enabled or configured.</p>';
                 return;
             }
 
-            if (!rclone.server_ready) {
-                rcloneStatus.textContent = 'Not Ready';
-                rcloneStatus.className = 'badge badge-warning';
-                rcloneContent.innerHTML = '<p class="text-base-content/70">Rclone server is not ready.</p>';
+            // For DFS mount
+            if (type === 'DFS') {
+                updateDFSStats(mountData, mountStatus, mountContent);
                 return;
             }
 
-            rcloneStatus.textContent = 'Active';
-            rcloneStatus.className = 'badge badge-success';
+            // For Rclone/External mount
+            if (!mountData.ready) {
+                mountStatus.textContent = 'Not Ready';
+                mountStatus.className = 'badge badge-warning';
+                mountContent.innerHTML = `<p class="text-base-content/70">${type} server is not ready.</p>`;
+                return;
+            }
 
+            mountStatus.textContent = 'Active';
+            mountStatus.className = 'badge badge-success';
+
+            updateRcloneStats(mountData, mountContent);
+        }
+
+        function updateDFSStats(data, statusEl, contentEl) {
+            if (!data.ready) {
+                statusEl.textContent = 'Not Ready';
+                statusEl.className = 'badge badge-warning';
+                contentEl.innerHTML = '<p class="text-base-content/70">DFS filesystem is not ready.</p>';
+                return;
+            }
+
+            statusEl.textContent = 'Active';
+            statusEl.className = 'badge badge-success';
+
+            let html = '<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">';
+
+            // DFS specific stats
+            if (data.stats) {
+                const stats = data.stats;
+                html += `
+                    <div class="stat">
+                        <div class="stat-title">Cache Hits</div>
+                        <div class="stat-value text-success">${formatNumber(stats.cache_hits || 0)}</div>
+                        <div class="stat-desc">Hit Rate: ${((stats.cache_hit_rate || 0) * 100).toFixed(1)}%</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-title">Network Requests</div>
+                        <div class="stat-value text-info">${formatNumber(stats.network_requests || 0)}</div>
+                        <div class="stat-desc">Bytes: ${window.decypharrUtils.formatBytes(stats.network_bytes || 0)}</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-title">Read Operations</div>
+                        <div class="stat-value text-primary">${formatNumber(stats.read_ops || 0)}</div>
+                        <div class="stat-desc">Latency: ${(stats.read_latency_ms || 0).toFixed(2)}ms</div>
+                    </div>
+                `;
+            }
+
+            html += '</div>';
+
+            // Add mount information if available
+            if (data.mounts && Object.keys(data.mounts).length > 0) {
+                html += `
+                    <div class="mt-6">
+                        <h3 class="text-lg font-semibold mb-3">
+                            <i class="bi bi-hdd-stack text-primary"></i>
+                            Mounted Services
+                        </h3>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                `;
+
+                Object.entries(data.mounts).forEach(([name, mount]) => {
+                    const statusBadge = mount.mounted ?
+                        '<span class="badge badge-success badge-sm">Mounted</span>' :
+                        '<span class="badge badge-error badge-sm">Not Mounted</span>';
+
+                    html += `
+                        <div class="card bg-base-200 compact">
+                            <div class="card-body">
+                                <div class="flex justify-between items-center">
+                                    <div>
+                                        <h4 class="font-medium">${mount.name || name}</h4>
+                                        <p class="text-xs text-base-content/70">DFS Mount</p>
+                                        ${mount.mount_path ? `<p class="text-xs text-base-content/60 font-mono">${mount.mount_path}</p>` : ''}
+                                    </div>
+                                    <div class="text-right">
+                                        ${statusBadge}
+                                        ${mount.mounted_at ? `<p class="text-xs text-base-content/60">Since: ${new Date(mount.mounted_at).toLocaleTimeString()}</p>` : ''}
+                                    </div>
+                                </div>
+                                ${mount.error ? `<div class="alert alert-error alert-sm mt-2"><span class="text-xs">${mount.error}</span></div>` : ''}
+                            </div>
+                        </div>
+                    `;
+                });
+
+                html += '</div></div>';
+            }
+
+            contentEl.innerHTML = html;
+        }
+
+        function updateRcloneStats(rclone, contentEl) {
             let html = '<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">';
 
             // Version info
@@ -305,7 +435,7 @@
                 html += '</div></div>';
             }
 
-            rcloneContent.innerHTML = html;
+            contentEl.innerHTML = html;
         }
 
         function updateDebridStats(debrids) {
@@ -420,8 +550,29 @@
             debridContent.innerHTML = html;
         }
 
+        function formatUptime(seconds) {
+            if (!seconds) return '-';
+
+            const days = Math.floor(seconds / 86400);
+            const hours = Math.floor((seconds % 86400) / 3600);
+            const minutes = Math.floor((seconds % 3600) / 60);
+            const secs = Math.floor(seconds % 60);
+
+            if (days > 0) {
+                return `${days}d ${hours}h ${minutes}m`;
+            } else if (hours > 0) {
+                return `${hours}h ${minutes}m ${secs}s`;
+            } else if (minutes > 0) {
+                return `${minutes}m ${secs}s`;
+            } else {
+                return `${secs}s`;
+            }
+        }
+
         function updateStats(stats) {
             // System overview
+            document.getElementById('uptime').textContent = formatUptime(stats.uptime_seconds);
+            document.getElementById('start-time').textContent = `Started: ${stats.start_time || '-'}`;
             document.getElementById('memory-used').textContent = stats.memory_used || '-';
             document.getElementById('heap-alloc').textContent = `Heap: ${stats.heap_alloc_mb || '-'}`;
             document.getElementById('goroutines').textContent = formatNumber(stats.goroutines || 0);
@@ -431,8 +582,8 @@
             document.getElementById('os').textContent = stats.os || '-';
             document.getElementById('go-version').textContent = stats.go_version || '-';
 
-            // Rclone stats
-            updateRcloneStats(stats.rclone);
+            // Mount stats (handles rclone, dfs, or external)
+            updateMountStats(stats.mount);
 
             // Debrid stats
             updateDebridStats(stats.debrids);

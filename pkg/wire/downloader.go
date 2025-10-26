@@ -322,8 +322,8 @@ func (s *Store) downloadFiles(torrent *Torrent, debridTorrent *types.Torrent, pa
 		totalSize += file.Size
 	}
 	debridTorrent.Lock()
-	debridTorrent.SizeDownloaded = 0 // Reset downloaded bytes
-	debridTorrent.Progress = 0       // Reset progress
+	debridTorrent.SizeDownloaded = 0 // Stop downloaded bytes
+	debridTorrent.Progress = 0       // Stop progress
 	debridTorrent.Unlock()
 	progressCallback := func(downloaded int64, speed int64) {
 		debridTorrent.Lock()

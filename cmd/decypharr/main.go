@@ -151,11 +151,11 @@ func startServices(ctx context.Context, cancelSvc context.CancelFunc, wd *webdav
 
 	// Start rclone RC server if enabled
 	safeGo(func() error {
-		rcManager := wire.Get().RcloneManager()
-		if rcManager == nil {
+		mountManager := wire.Get().MountManager()
+		if mountManager == nil {
 			return nil
 		}
-		return rcManager.Start(ctx)
+		return mountManager.Start(ctx)
 	})
 
 	if cfg := config.Get(); cfg.Repair.Enabled {

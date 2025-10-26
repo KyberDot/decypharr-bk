@@ -94,7 +94,7 @@ func (h *Handler) RemoveAll(ctx context.Context, name string) error {
 			return os.ErrNotExist
 		}
 		// Remove the torrent from the cache and debrid
-		h.cache.OnRemove(torrent.Id)
+		h.cache.RemoveTorrent(torrent.Id)
 		return nil
 	}
 	// If we reach here, it means the path is a file
@@ -106,7 +106,6 @@ func (h *Handler) RemoveAll(ctx context.Context, name string) error {
 				filename := filepath.Clean(path.Join(parts[2:]...))
 				if file, ok := cached.GetFile(filename); ok {
 					if err := h.cache.RemoveFile(cached.Id, file.Name); err != nil {
-						h.logger.Error().Err(err).Msgf("Failed to remove file %s from torrent %s", file.Name, torrentName)
 						return err
 					}
 					// If the file was successfully removed, we can return nil
@@ -546,7 +545,7 @@ func (h *Handler) handleDeleteById(w http.ResponseWriter, tId string) error {
 		return os.ErrNotExist
 	}
 
-	h.cache.OnRemove(cachedTorrent.Id)
+	h.cache.RemoveTorrent(cachedTorrent.Id)
 	w.WriteHeader(http.StatusNoContent)
 	return nil
 }
@@ -562,7 +561,7 @@ func (h *Handler) handleDeleteAll(w http.ResponseWriter) error {
 		tName := strings.TrimSpace(strings.SplitN(fi.Name(), "||", 2)[0])
 		t := h.cache.GetTorrentByName(tName)
 		if t != nil {
-			h.cache.OnRemove(t.Id)
+			h.cache.RemoveTorrent(t.Id)
 		}
 	}
 

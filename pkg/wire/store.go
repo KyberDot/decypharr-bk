@@ -12,7 +12,7 @@ import (
 	"github.com/sirrobot01/decypharr/internal/logger"
 	"github.com/sirrobot01/decypharr/pkg/arr"
 	"github.com/sirrobot01/decypharr/pkg/debrid"
-	"github.com/sirrobot01/decypharr/pkg/rclone"
+	"github.com/sirrobot01/decypharr/pkg/mount"
 	"github.com/sirrobot01/decypharr/pkg/repair"
 )
 
@@ -20,7 +20,7 @@ type Store struct {
 	repair             *repair.Repair
 	arr                *arr.Storage
 	debrid             *debrid.Storage
-	rcloneManager      *rclone.Manager
+	mountManager       mount.Manager
 	importsQueue       *ImportQueue // Queued import requests(probably from too_many_active_downloads)
 	torrents           *TorrentStorage
 	logger             zerolog.Logger
@@ -29,6 +29,7 @@ type Store struct {
 	downloadSemaphore  chan struct{}
 	removeStalledAfter time.Duration // Duration after which stalled torrents are removed
 	scheduler          gocron.Scheduler
+	startTime          time.Time // Application start time for uptime tracking
 }
 
 var (
@@ -43,14 +44,11 @@ func Get() *Store {
 		qbitCfg := cfg.QBitTorrent
 
 		// Create rclone manager if enabled
-		var rcManager *rclone.Manager
-		if cfg.Rclone.Enabled {
-			rcManager = rclone.NewManager()
-		}
+		mountManager := mount.NewManager()
 
 		// Create services with dependencies
 		arrs := arr.NewStorage()
-		deb := debrid.NewStorage(rcManager)
+		deb := debrid.NewStorage()
 
 		scheduler, err := gocron.NewScheduler(gocron.WithLocation(time.Local), gocron.WithGlobalJobOptions(gocron.WithTags("decypharr-store")))
 		if err != nil {
@@ -61,7 +59,7 @@ func Get() *Store {
 			repair:            repair.New(arrs, deb),
 			arr:               arrs,
 			debrid:            deb,
-			rcloneManager:     rcManager,
+			mountManager:      mountManager,
 			torrents:          newTorrentStorage(cfg.TorrentsFile()),
 			logger:            logger.Default(), // Use default logger [decypharr]
 			refreshInterval:   time.Duration(cmp.Or(qbitCfg.RefreshInterval, 30)) * time.Second,
@@ -69,6 +67,7 @@ func Get() *Store {
 			downloadSemaphore: make(chan struct{}, cmp.Or(qbitCfg.MaxDownloads, 5)),
 			importsQueue:      NewImportQueue(context.Background(), 1000),
 			scheduler:         scheduler,
+			startTime:         time.Now(), // Record start time
 		}
 		if cfg.RemoveStalledAfter != "" {
 			removeStalledAfter, err := time.ParseDuration(cfg.RemoveStalledAfter)
@@ -86,13 +85,12 @@ func Reset() {
 			instance.debrid.Reset()
 		}
 
-		if instance.rcloneManager != nil {
-			err := instance.rcloneManager.Stop()
+		if instance.mountManager != nil {
+			err := instance.mountManager.Stop()
 			if err != nil {
 				instance.logger.Error().Err(err).Msg("Failed to stop rclone manager")
 			}
 		}
-
 		if instance.importsQueue != nil {
 			instance.importsQueue.Close()
 		}
@@ -121,10 +119,18 @@ func (s *Store) Repair() *repair.Repair {
 func (s *Store) Torrents() *TorrentStorage {
 	return s.torrents
 }
-func (s *Store) RcloneManager() *rclone.Manager {
-	return s.rcloneManager
+func (s *Store) MountManager() mount.Manager {
+	return s.mountManager
 }
 
 func (s *Store) Scheduler() gocron.Scheduler {
 	return s.scheduler
+}
+
+func (s *Store) Uptime() time.Duration {
+	return time.Since(s.startTime)
+}
+
+func (s *Store) StartTime() time.Time {
+	return s.startTime
 }

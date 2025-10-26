@@ -250,6 +250,7 @@ func (wb *Web) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	// Update Repair config
 	currentConfig.Repair = updatedConfig.Repair
 	currentConfig.Rclone = updatedConfig.Rclone
+	currentConfig.Dfs = updatedConfig.Dfs
 
 	// Update Debrids
 	currentConfig.Debrids = updatedConfig.Debrids

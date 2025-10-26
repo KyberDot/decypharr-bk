@@ -104,7 +104,6 @@ func (s *Server) getLogs(w http.ResponseWriter, r *http.Request) {
 
 	// Stream the file
 	if _, err := io.Copy(w, file); err != nil {
-		s.logger.Error().Err(err).Msg("Error streaming log file")
 		http.Error(w, "Error streaming log file", http.StatusInternalServerError)
 		return
 	}
@@ -122,7 +121,6 @@ func (s *Server) getRcloneLogs(w http.ResponseWriter, r *http.Request) {
 	defer func(file *os.File) {
 		err := file.Close()
 		if err != nil {
-			s.logger.Error().Err(err).Msg("Error closing log file")
 			return
 
 		}
@@ -137,8 +135,7 @@ func (s *Server) getRcloneLogs(w http.ResponseWriter, r *http.Request) {
 
 	// Stream the file
 	if _, err := io.Copy(w, file); err != nil {
-		s.logger.Error().Err(err).Msg("Error streaming log file")
-		http.Error(w, "Error streaming log file", http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("error stremaing file %s", err), http.StatusInternalServerError)
 		return
 	}
 }

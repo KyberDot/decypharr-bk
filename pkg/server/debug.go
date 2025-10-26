@@ -6,6 +6,7 @@ import (
 	"runtime"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/request"
 	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"github.com/sirrobot01/decypharr/pkg/wire"
@@ -73,6 +74,11 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	var memStats runtime.MemStats
 	runtime.ReadMemStats(&memStats)
 
+	// Get uptime from the store
+	store := wire.Get()
+	uptime := store.Uptime()
+	startTime := store.StartTime()
+
 	stats := map[string]any{
 		// Memory stats
 		"heap_alloc_mb":  fmt.Sprintf("%.2fMB", float64(memStats.HeapAlloc)/1024/1024),
@@ -91,6 +97,11 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		"os":         runtime.GOOS,
 		"arch":       runtime.GOARCH,
 		"go_version": runtime.Version(),
+
+		// Uptime info
+		"uptime_seconds": int64(uptime.Seconds()),
+		"uptime":         uptime.String(),
+		"start_time":     startTime.Format("2006-01-02 15:04:05"),
 	}
 
 	debrids := wire.Get().Debrid()
@@ -125,22 +136,27 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		stats["debrids"] = debridStats
 	}
 
-	// Add rclone stats if available
-	if rcManager := wire.Get().RcloneManager(); rcManager != nil && rcManager.IsReady() {
-		rcStats, err := rcManager.GetStats()
+	// Add mount stats if available (supports rclone, dfs, or external)
+	cfg := config.Get()
+	mountManager := wire.Get().MountManager()
+
+	if mountManager != nil && mountManager.IsReady() {
+		mountStats, err := mountManager.GetStats()
 		if err != nil {
-			s.logger.Error().Err(err).Msg("Failed to get rclone stats")
-			stats["rclone"] = map[string]interface{}{
-				"enabled":      true,
-				"server_ready": false,
+			stats["mount"] = map[string]interface{}{
+				"error":   fmt.Sprintf("failed to get mount stats: %v", err),
+				"type":    mountManager.Type(),
+				"ready":   true,
+				"enabled": cfg.Dfs.Enabled || cfg.Rclone.Enabled,
 			}
 		} else {
-			stats["rclone"] = rcStats
+			stats["mount"] = mountStats
 		}
 	} else {
-		stats["rclone"] = map[string]interface{}{
-			"enabled":      false,
-			"server_ready": false,
+		// No mount enabled or not ready
+		stats["mount"] = map[string]interface{}{
+			"ready":   false,
+			"enabled": cfg.Dfs.Enabled || cfg.Rclone.Enabled,
 		}
 	}
 

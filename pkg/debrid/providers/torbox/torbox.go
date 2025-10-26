@@ -9,6 +9,7 @@ import (
 	gourl "net/url"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -40,6 +41,7 @@ type Torbox struct {
 	logger      zerolog.Logger
 	checkCached bool
 	addSamples  bool
+	Profile     *types.Profile
 }
 
 func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Torbox, error) {
@@ -112,13 +114,11 @@ func (tb *Torbox) IsAvailable(hashes []string) map[string]bool {
 		req, _ := http.NewRequest(http.MethodGet, url, nil)
 		resp, err := tb.client.MakeRequest(req)
 		if err != nil {
-			tb.logger.Error().Err(err).Msgf("Error checking availability")
 			return result
 		}
 		var res AvailableResponse
 		err = json.Unmarshal(resp, &res)
 		if err != nil {
-			tb.logger.Error().Err(err).Msgf("Error marshalling availability")
 			return result
 		}
 		if res.Data == nil {
@@ -174,20 +174,25 @@ func (tb *Torbox) getTorboxStatus(status string, finished bool) string {
 	if finished {
 		return "downloaded"
 	}
-	downloading := []string{"completed", "cached", "paused", "downloading", "uploading",
+	downloading := []string{"paused", "downloading",
 		"checkingResumeData", "metaDL", "pausedUP", "queuedUP", "checkingUP",
 		"forcedUP", "allocating", "downloading", "metaDL", "pausedDL",
 		"queuedDL", "checkingDL", "forcedDL", "checkingResumeData", "moving"}
 
-	var determinedStatus string
-	switch {
-	case utils.Contains(downloading, status):
-		determinedStatus = "downloading"
-	default:
-		determinedStatus = "error"
+	downloaded := []string{
+		"completed", "cached", "uploading",
 	}
 
-	return determinedStatus
+	status = regexp.MustCompile(`\s*\(.*?\)\s*`).ReplaceAllString(status, "")
+
+	switch {
+	case utils.Contains(downloading, status):
+		return "downloading"
+	case utils.Contains(downloaded, status):
+		return "downloaded"
+	default:
+		return "error"
+	}
 }
 
 func (tb *Torbox) GetTorrent(torrentId string) (*types.Torrent, error) {
@@ -266,17 +271,6 @@ func (tb *Torbox) GetTorrent(torrentId string) (*types.Torrent, error) {
 
 		t.Files[fileName] = file
 	}
-
-	// Log summary only if there are issues or for debugging
-	tb.logger.Debug().
-		Str("torrent_id", t.Id).
-		Str("torrent_name", t.Name).
-		Bool("download_finished", data.DownloadFinished).
-		Str("status", t.Status).
-		Int("total_files", totalFiles).
-		Int("valid_files", validFiles).
-		Int("final_file_count", len(t.Files)).
-		Msg("Torrent file processing completed")
 	var cleanPath string
 	if len(t.Files) > 0 {
 		cleanPath = path.Clean(data.Files[0].Name)
@@ -407,47 +401,53 @@ func (tb *Torbox) DeleteTorrent(torrentId string) error {
 }
 
 func (tb *Torbox) GetFileDownloadLinks(t *types.Torrent) error {
-	filesCh := make(chan types.File, len(t.Files))
-	linkCh := make(chan types.DownloadLink)
-	errCh := make(chan error, len(t.Files))
-
 	var wg sync.WaitGroup
-	wg.Add(len(t.Files))
-	for _, file := range t.Files {
-		go func() {
+	var mu sync.Mutex
+	var firstErr error
+
+	files := make(map[string]types.File)
+	links := make(map[string]types.DownloadLink)
+
+	_files := t.GetFiles()
+	wg.Add(len(_files))
+
+	for _, f := range _files {
+		go func(file types.File) {
 			defer wg.Done()
+
 			link, err := tb.GetDownloadLink(t, &file)
 			if err != nil {
-				errCh <- err
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				mu.Unlock()
 				return
 			}
-			if link.DownloadLink != "" {
-				linkCh <- link
-				file.DownloadLink = link
+			if link.Empty() {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("tobox API error: download link not found for file %s", file.Name)
+				}
+				mu.Unlock()
+				return
 			}
-			filesCh <- file
-		}()
-	}
-	go func() {
-		wg.Wait()
-		close(filesCh)
-		close(linkCh)
-		close(errCh)
-	}()
 
-	// Collect results
-	files := make(map[string]types.File, len(t.Files))
-	for file := range filesCh {
-		files[file.Name] = file
+			file.DownloadLink = link
+			mu.Lock()
+			files[file.Name] = file
+			links[link.Link] = link
+			mu.Unlock()
+		}(f)
 	}
 
-	// Check for errors
-	for err := range errCh {
-		if err != nil {
-			return err // Return the first error encountered
-		}
+	wg.Wait()
+
+	if firstErr != nil {
+		return firstErr
 	}
 
+	// Add links to cache
 	t.Files = files
 	return nil
 }
@@ -463,41 +463,20 @@ func (tb *Torbox) GetDownloadLink(t *types.Torrent, file *types.File) (types.Dow
 	req, _ := http.NewRequest(http.MethodGet, url, nil)
 	resp, err := tb.client.MakeRequest(req)
 	if err != nil {
-		tb.logger.Error().
-			Err(err).
-			Str("torrent_id", t.Id).
-			Str("file_id", file.Id).
-			Msg("Failed to make request to Torbox API")
 		return types.DownloadLink{}, err
 	}
 
 	var data DownloadLinksResponse
 	if err = json.Unmarshal(resp, &data); err != nil {
-		tb.logger.Error().
-			Err(err).
-			Str("torrent_id", t.Id).
-			Str("file_id", file.Id).
-			Msg("Failed to unmarshal Torbox API response")
 		return types.DownloadLink{}, err
 	}
 
 	if data.Data == nil {
-		tb.logger.Error().
-			Str("torrent_id", t.Id).
-			Str("file_id", file.Id).
-			Bool("success", data.Success).
-			Interface("error", data.Error).
-			Str("detail", data.Detail).
-			Msg("Torbox API returned no data")
 		return types.DownloadLink{}, fmt.Errorf("error getting download links")
 	}
 
 	link := *data.Data
 	if link == "" {
-		tb.logger.Error().
-			Str("torrent_id", t.Id).
-			Str("file_id", file.Id).
-			Msg("Torbox API returned empty download link")
 		return types.DownloadLink{}, fmt.Errorf("error getting download links")
 	}
 
@@ -639,12 +618,84 @@ func (tb *Torbox) GetMountPath() string {
 }
 
 func (tb *Torbox) GetAvailableSlots() (int, error) {
-	//TODO: Implement the logic to check available slots for Torbox
-	return 0, fmt.Errorf("not implemented")
+	// Torbox doesnt provide a slot info via the API
+	// Fetching all torrents(active and inactive) is very expensive and not efficient
+	// So we will return only the profile based slots
+	var planSlots = map[string]int{
+		"essential": 3,
+		"standard":  5,
+		"pro":       10,
+	}
+
+	var accountSlots = 1
+	profile, err := tb.GetProfile()
+	if err != nil {
+		return 0, err
+	}
+
+	if slots, ok := planSlots[profile.Type]; ok {
+		accountSlots = slots
+	}
+	return accountSlots, nil
+
+	//activeTorrents, err := tb.GetTorrents()
+	//if err != nil {
+	//	return 0, err
+	//}
+	//
+	//activeCount := 0
+	//for _, t := range activeTorrents {
+	//	if utils.Contains(tb.GetDownloadingStatus(), t.Status) {
+	//		activeCount++
+	//	}
+	//}
+	//
+	//available := max(accountSlots-activeCount, 0)
+	//
+	//return available, nil
 }
 
 func (tb *Torbox) GetProfile() (*types.Profile, error) {
-	return nil, nil
+	if tb.Profile != nil {
+		return tb.Profile, nil
+	}
+
+	url := fmt.Sprintf("%s/api/user/me?settings=true", tb.Host)
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+
+	resp, err := tb.client.MakeRequest(req)
+	if err != nil {
+		return nil, err
+	}
+
+	var userData ProfileResponse
+	if json.Unmarshal(resp, &userData) != nil {
+		return nil, err
+	}
+
+	expiration := time.Unix(userData.PremiumExpiresAt, 0)
+	profile := &types.Profile{
+		Name:       tb.name,
+		Id:         userData.Id,
+		Username:   userData.Email,
+		Email:      userData.Email,
+		Expiration: expiration,
+	}
+
+	switch userData.Plan {
+	case 1:
+		profile.Type = "essential"
+	case 2:
+		profile.Type = "pro"
+	case 3:
+		profile.Type = "standard"
+	default:
+		profile.Type = "free"
+	}
+
+	tb.Profile = profile
+
+	return profile, nil
 }
 
 func (tb *Torbox) AccountManager() *account.Manager {

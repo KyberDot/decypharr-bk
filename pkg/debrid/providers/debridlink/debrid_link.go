@@ -106,13 +106,11 @@ func (dl *DebridLink) IsAvailable(hashes []string) map[string]bool {
 		req, _ := http.NewRequest(http.MethodGet, url, nil)
 		resp, err := dl.client.MakeRequest(req)
 		if err != nil {
-			dl.logger.Error().Err(err).Msgf("Error checking availability")
 			return result
 		}
 		var data AvailableResponse
 		err = json.Unmarshal(resp, &data)
 		if err != nil {
-			dl.logger.Error().Err(err).Msgf("Error marshalling availability")
 			return result
 		}
 		if data.Value == nil {
@@ -395,7 +393,6 @@ func (dl *DebridLink) getTorrents(page, perPage int) ([]*types.Torrent, error) {
 	var res torrentInfo
 	err = json.Unmarshal(resp, &res)
 	if err != nil {
-		dl.logger.Error().Err(err).Msgf("Error unmarshalling torrent info")
 		return torrents, err
 	}
 
@@ -482,7 +479,6 @@ func (dl *DebridLink) GetProfile() (*types.Profile, error) {
 	var res UserInfo
 	err = json.Unmarshal(resp, &res)
 	if err != nil {
-		dl.logger.Error().Err(err).Msgf("Error unmarshalling user info")
 		return nil, err
 	}
 	if !res.Success || res.Value == nil {

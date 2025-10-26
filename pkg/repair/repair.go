@@ -110,7 +110,7 @@ func (r *Repair) Reset() {
 			r.logger.Error().Err(err).Msg("Error shutting down scheduler")
 		}
 	}
-	// Reset jobs
+	// Stop jobs
 	r.Jobs = make(map[string]*Job)
 
 }
@@ -248,11 +248,9 @@ func (r *Repair) preRunChecks() error {
 	}
 	resp, err := http.Get(fmt.Sprint(r.ZurgURL, "/http/version.txt"))
 	if err != nil {
-		r.logger.Error().Err(err).Msgf("Precheck failed: Failed to reach zurg at %s", r.ZurgURL)
 		return err
 	}
 	if resp.StatusCode != http.StatusOK {
-		r.logger.Debug().Msgf("Precheck failed: Zurg returned %d", resp.StatusCode)
 		return err
 	}
 	return nil

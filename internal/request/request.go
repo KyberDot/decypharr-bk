@@ -165,7 +165,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	var resp *http.Response
 
 	for attempt := 0; attempt <= c.maxRetries; attempt++ {
-		// Reset the request body if it exists
+		// Stop the request body if it exists
 		if bodyBytes != nil {
 			req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		}
@@ -421,7 +421,6 @@ func SetProxy(transport *http.Transport, proxyURL string) {
 	} else {
 		transport.Proxy = http.ProxyFromEnvironment
 	}
-	return
 }
 
 func ValidateURL(urlStr string) error {

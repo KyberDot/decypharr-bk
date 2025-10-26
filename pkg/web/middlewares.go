@@ -2,30 +2,11 @@ package web
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/sirrobot01/decypharr/internal/config"
 )
-
-func (wb *Web) setupMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cfg := config.Get()
-		needsSetup := cfg.CheckSetup()
-		if needsSetup != nil && r.URL.Path != "/settings" && r.URL.Path != "/api/config" {
-			http.Redirect(w, r, fmt.Sprintf("/settings?inco=%s", needsSetup.Error()), http.StatusSeeOther)
-			return
-		}
-
-		// strip inco from URL
-		if inco := r.URL.Query().Get("inco"); inco != "" && needsSetup == nil && r.URL.Path == "/settings" {
-			// redirect to the same URL without the inco parameter
-			http.Redirect(w, r, "/settings", http.StatusSeeOther)
-		}
-		next.ServeHTTP(w, r)
-	})
-}
 
 func (wb *Web) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

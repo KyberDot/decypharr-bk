@@ -20,7 +20,7 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/debrid/providers/torbox"
 	debridStore "github.com/sirrobot01/decypharr/pkg/debrid/store"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
-	"github.com/sirrobot01/decypharr/pkg/rclone"
+	"github.com/sirrobot01/decypharr/pkg/mount"
 	"go.uber.org/ratelimit"
 )
 
@@ -39,7 +39,7 @@ func (de *Debrid) Cache() *debridStore.Cache {
 
 func (de *Debrid) Reset() {
 	if de.cache != nil {
-		de.cache.Reset()
+		de.cache.Stop()
 	}
 }
 
@@ -49,18 +49,12 @@ type Storage struct {
 	lastUsed string
 }
 
-func NewStorage(rcManager *rclone.Manager) *Storage {
+func NewStorage() *Storage {
 	cfg := config.Get()
 
 	_logger := logger.Default()
 
 	debrids := make(map[string]*Debrid)
-
-	bindAddress := cfg.BindAddress
-	if bindAddress == "" {
-		bindAddress = "localhost"
-	}
-	webdavUrl := fmt.Sprintf("http://%s:%s%s/webdav", bindAddress, cfg.Port, cfg.URLBase)
 
 	for _, dc := range cfg.Debrids {
 		client, err := createDebridClient(dc)
@@ -69,15 +63,19 @@ func NewStorage(rcManager *rclone.Manager) *Storage {
 			continue
 		}
 		var (
-			cache   *debridStore.Cache
-			mounter *rclone.Mount
+			cache *debridStore.Cache
 		)
 		_log := client.Logger()
 		if dc.UseWebDav {
-			if cfg.Rclone.Enabled && rcManager != nil {
-				mounter = rclone.NewMount(dc.Name, dc.RcloneMountPath, webdavUrl, rcManager)
+			cache = debridStore.NewDebridCache(dc, client)
+			mounter, err := mount.NewMounter(cache)
+			if err == nil {
+				// Set events here
+				_log.Info().Msgf("Using %s mounter for mounting", mounter.Type())
+				cache.SetEventHandlers(mount.NewEventHandlers(mounter))
+			} else {
+				_log.Error().Err(err).Msg("Failed to create mounter for debrid cache")
 			}
-			cache = debridStore.NewDebridCache(dc, client, mounter)
 			_log.Info().Msg("Debrid Service started with WebDAV")
 		} else {
 			_log.Info().Msg("Debrid Service started")
@@ -213,7 +211,7 @@ func (d *Storage) Reset() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	// Reset all debrid clients and caches
+	// Stop all debrid clients and caches
 	for _, debrid := range d.debrids {
 		if debrid != nil {
 			debrid.Reset()

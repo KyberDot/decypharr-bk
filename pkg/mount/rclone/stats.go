@@ -49,20 +49,22 @@ type BandwidthStats struct {
 
 // Stats represents rclone statistics
 type Stats struct {
+	Type      string                `json:"type"`
 	Enabled   bool                  `json:"enabled"`
-	Ready     bool                  `json:"server_ready"`
+	Ready     bool                  `json:"ready"`
 	Core      CoreStatsResponse     `json:"core"`
 	Memory    MemoryStats           `json:"memory"`
-	Mount     map[string]*MountInfo `json:"mount"`
+	Mounts    map[string]*MountInfo `json:"mounts"`
 	Bandwidth BandwidthStats        `json:"bandwidth"`
 	Version   VersionResponse       `json:"version"`
 }
 
 // GetStats retrieves statistics from the rclone RC server
-func (m *Manager) GetStats() (*Stats, error) {
+func (m *Manager) GetStats() (map[string]interface{}, error) {
 	stats := &Stats{}
 	stats.Ready = m.IsReady()
 	stats.Enabled = true
+	stats.Type = m.Type()
 
 	coreStats, err := m.GetCoreStats()
 	if err == nil {
@@ -79,7 +81,7 @@ func (m *Manager) GetStats() (*Stats, error) {
 	if err == nil && bwStats != nil {
 		stats.Bandwidth = *bwStats
 	} else {
-		fmt.Println("Failed to get rclone stats", err)
+		m.logger.Error().Err(err).Msg("Failed to get rclone stats")
 	}
 
 	// Get version info
@@ -88,9 +90,17 @@ func (m *Manager) GetStats() (*Stats, error) {
 		stats.Version = *versionResp
 	}
 
-	// Get mount info
-	stats.Mount = m.GetAllMounts()
-	return stats, nil
+	// Convert to map[string]interface{}
+	statsMap := make(map[string]interface{})
+	data, err := json.Marshal(stats)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal stats: %w", err)
+	}
+	if err := json.Unmarshal(data, &statsMap); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal stats to map: %w", err)
+	}
+
+	return statsMap, nil
 }
 
 func (m *Manager) GetCoreStats() (*CoreStatsResponse, error) {
@@ -102,7 +112,7 @@ func (m *Manager) GetCoreStats() (*CoreStatsResponse, error) {
 		Command: "core/stats",
 	}
 
-	resp, err := m.makeRequest(req, false)
+	resp, err := makeRequest(req, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get core stats: %w", err)
 	}
@@ -125,7 +135,7 @@ func (m *Manager) GetMemoryUsage() (*MemoryStats, error) {
 		Command: "core/memstats",
 	}
 
-	resp, err := m.makeRequest(req, false)
+	resp, err := makeRequest(req, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get memory stats: %w", err)
 	}
@@ -148,7 +158,7 @@ func (m *Manager) GetBandwidthStats() (*BandwidthStats, error) {
 		Command: "core/bwlimit",
 	}
 
-	resp, err := m.makeRequest(req, false)
+	resp, err := makeRequest(req, false)
 	if err != nil {
 		// Bandwidth stats might not be available, return empty
 		return nil, nil
@@ -171,7 +181,7 @@ func (m *Manager) GetVersion() (*VersionResponse, error) {
 		Command: "core/version",
 	}
 
-	resp, err := m.makeRequest(req, false)
+	resp, err := makeRequest(req, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get version: %w", err)
 	}
