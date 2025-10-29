@@ -13,12 +13,12 @@ import (
 // Metadata stores information about a cached file
 // This is persisted to disk as JSON in the vfsMeta directory
 type Metadata struct {
-	ModTime     time.Time     `json:"mod_time"`     // Modification time of remote file
-	ATime       time.Time     `json:"atime"`        // Last access time (for LRU)
-	Size        int64         `json:"size"`         // Total file size
-	Ranges      []ranges.Range `json:"ranges"`       // Which parts are cached
-	Fingerprint string        `json:"fingerprint"`  // Hash/ETag for cache validation
-	Dirty       bool          `json:"dirty"`        // Has unflushed writes
+	ModTime     time.Time      `json:"mod_time"`    // Modification time of remote file
+	ATime       time.Time      `json:"atime"`       // Last access time (for LRU)
+	Size        int64          `json:"size"`        // Total file size
+	Ranges      []ranges.Range `json:"ranges"`      // Which parts are cached
+	Fingerprint string         `json:"fingerprint"` // Hash/ETag for cache validation
+	Dirty       bool           `json:"dirty"`       // Has unflushed writes
 }
 
 // metadataPath returns the path to the metadata file for a given cache file

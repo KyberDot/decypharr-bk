@@ -104,12 +104,8 @@ func (h *Handler) RemoveAll(ctx context.Context, name string) error {
 			cached := h.cache.GetTorrentByName(torrentName)
 			if cached != nil && len(parts) >= 3 {
 				filename := filepath.Clean(path.Join(parts[2:]...))
-				if file, ok := cached.GetFile(filename); ok {
-					if err := h.cache.RemoveFile(cached.Id, file.Name); err != nil {
-						return err
-					}
-					// If the file was successfully removed, we can return nil
-					return nil
+				if err := h.cache.RemoveFile(torrentName, filename); err != nil {
+					return err
 				}
 			}
 		}

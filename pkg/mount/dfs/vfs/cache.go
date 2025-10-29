@@ -6,12 +6,10 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
-	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/sirrobot01/decypharr/pkg/debrid/store"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
@@ -26,15 +24,11 @@ type StatsTracker struct {
 
 // TrackActiveRead increments/decrements active read counter
 func (st *StatsTracker) TrackActiveRead(delta int64) {
-	if st != nil {
-		st.activeReads.Add(delta)
-	}
+	st.activeReads.Add(delta)
 }
 
 func (st *StatsTracker) TrackOpenFiles(delta int64) {
-	if st != nil {
-		st.openedFiles.Add(delta)
-	}
+	st.openedFiles.Add(delta)
 }
 
 // CacheType represents the type of caching to perform
@@ -84,8 +78,7 @@ type FileAccessInfo struct {
 type Manager struct {
 	debrid      *store.Cache
 	config      *config.FuseConfig
-	files       *lru.Cache[string, *SparseFile]
-	mu          sync.RWMutex
+	files       *xsync.Map[string, *SparseFile]
 	closeCtx    context.Context
 	closeCancel context.CancelFunc
 
@@ -102,26 +95,21 @@ type Manager struct {
 
 // NewManager creates a sparseFile manager
 func NewManager(debridCache *store.Cache, fuseConfig *config.FuseConfig) *Manager {
-	// Each SparseFile holds: open FD + lazy-loaded ranges + state
-	files, _ := lru.NewWithEvict(50, func(key string, sf *SparseFile) {
-		_ = sf.Close()
-	})
+	// Create stats tracker
+	statsTracker := &StatsTracker{}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &Manager{
-		config:      fuseConfig,
-		debrid:      debridCache,
-		files:       files,
-		closeCtx:    ctx,
-		closeCancel: cancel,
+		config:            fuseConfig,
+		debrid:            debridCache,
+		files:             xsync.NewMap[string, *SparseFile](),
+		closeCtx:          ctx,
+		closeCancel:       cancel,
+		stats:             statsTracker,
+		fileAccessTracker: xsync.NewMap[string, *FileAccessInfo](),
 	}
-
-	// Create stats tracker that references the Manager's atomic counters
-	m.stats = &StatsTracker{}
 	go m.closeIdleFilesLoop()
 	go m.Cleanup(ctx)
-
-	// Initialize file access tracker for smart caching
-	m.fileAccessTracker = xsync.NewMap[string, *FileAccessInfo]()
 
 	return m
 }
@@ -143,64 +131,50 @@ func (m *Manager) closeIdleFilesLoop() {
 func (m *Manager) closeIdleFiles() {
 	threshold := time.Now().Add(-m.config.FileIdleTimeout)
 
-	m.mu.RLock()
-	keys := m.files.Keys()
-	m.mu.RUnlock()
+	// Iterate through all files and close idle ones
+	m.files.Range(func(key string, sf *SparseFile) bool {
+		sf.mu.RLock()
+		shouldClose := sf.lastAccess.Before(threshold) && sf.file != nil
+		sf.mu.RUnlock()
 
-	for _, key := range keys {
-		m.mu.RLock()
-		sf, ok := m.files.Peek(key)
-		m.mu.RUnlock()
-
-		if ok {
-			sf.mu.RLock()
-			shouldClose := sf.lastAccess.Before(threshold) && sf.file != nil
-			sf.mu.RUnlock()
-
-			if shouldClose {
-				_ = sf.closeFD()
-			}
+		if shouldClose {
+			_ = sf.closeFD()
 		}
-	}
+		return true // Continue iteration
+	})
 }
 
 // GetOrCreateFile gets or creates a sparse file for caching
 func (m *Manager) GetOrCreateFile(torrentName, filename string, size int64) (*SparseFile, error) {
 	key := sanitizeForPath(filepath.Join(torrentName, filename))
 
-	m.mu.RLock()
-	if sf, ok := m.files.Get(key); ok {
-		m.mu.RUnlock()
+	// Try to get existing file
+	if sf, ok := m.files.Load(key); ok {
 		// Verify the sparse file still exists on disk
-		if !m.sparseFileExists(sf) {
-			// File was deleted, remove from cache and recreate
-			m.files.Remove(key)
-		} else {
-			return sf, nil
-		}
-	} else {
-		m.mu.RUnlock()
-	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Double check after acquiring write lock
-	if sf, ok := m.files.Get(key); ok {
 		if m.sparseFileExists(sf) {
 			return sf, nil
 		}
 		// File was deleted, remove from cache
-		m.files.Remove(key)
+		m.files.Delete(key)
+		m.stats.TrackOpenFiles(-1)
 	}
 
+	// Create new sparse file
 	sf, err := newSparseFile(m.config.CacheDir, torrentName, filename, size, m.config.ChunkSize, m.stats, m)
 	if err != nil {
 		return nil, err
 	}
 
-	m.files.Add(key, sf)
-	m.stats.TrackOpenFiles(1) // Track open file
+	// Try to store it, or use existing if someone else created it first
+	actual, loaded := m.files.LoadOrStore(key, sf)
+	if loaded {
+		// Someone else created it first, close ours and use theirs
+		_ = sf.Close()
+		return actual, nil
+	}
+
+	// We created it successfully
+	m.stats.TrackOpenFiles(1)
 	return sf, nil
 }
 
@@ -210,54 +184,74 @@ func (m *Manager) sparseFileExists(sf *SparseFile) bool {
 	return err == nil
 }
 
-// CreateReader creates a reader optimized for scan operations
-func (m *Manager) CreateReader(torrentName string, torrentFile types.File) (*Handle, error) {
-	sf, err := m.GetOrCreateFile(torrentName, torrentFile.Name, torrentFile.Size)
-	if err != nil {
-		return nil, err
+// CreateReader creates a unified File with download capabilities
+func (m *Manager) CreateReader(torrentName string, torrentFile types.File) (*File, error) {
+	key := sanitizeForPath(filepath.Join(torrentName, torrentFile.Name))
+
+	// Check if already exists
+	if f, ok := m.files.Load(key); ok {
+		// Make sure it has download capabilities
+		if f.debrid != nil {
+			return f, nil
+		}
+		// Old file without download support, remove it
+		m.files.Delete(key)
+		_ = f.Close()
 	}
 
-	// For scans, use smaller chunks and more aggressive concurrency
+	// Create new file with download capabilities
 	chunkSize := m.config.ChunkSize
 	readAhead := m.config.ReadAheadSize
-	maxConcurrent := m.config.MaxConcurrentReads
 
 	if readAhead == 0 {
 		readAhead = chunkSize * 2 // Minimum 2 chunks ahead for smooth playback
 	}
 
-	// Prevent deadlock: semaphore size must be at least 1
-	if maxConcurrent < 1 {
-		maxConcurrent = 1
+	f, err := newFile(m.config.CacheDir, m.debrid, torrentName, torrentFile, chunkSize, readAhead, m.stats, m)
+	if err != nil {
+		return nil, err
 	}
 
-	reader := NewReader(m.debrid, torrentName, torrentFile, sf, chunkSize, readAhead, maxConcurrent, m.stats, m)
-	return NewHandle(reader), nil
+	// Try to store (race-safe)
+	actual, loaded := m.files.LoadOrStore(key, f)
+	if loaded {
+		// Someone else created it first, close ours and use theirs
+		_ = f.Close()
+		return actual, nil
+	}
+
+	// We created it successfully
+	m.stats.TrackOpenFiles(1)
+	return f, nil
 }
 
 // Close closes all sparse files
 func (m *Manager) Close() error {
 	m.closeCancel()
 
-	m.files.Purge() // Calls evict callback for all entries
+	// Close all files
+	m.files.Range(func(key string, sf *SparseFile) bool {
+		_ = sf.Close()
+		return true
+	})
+	m.files.Clear()
 	return nil
 }
 
 func (m *Manager) CloseFile(filePath string) error {
-	if _, exists := m.files.Peek(filePath); exists {
-		m.stats.TrackOpenFiles(-1) // Decrement open file count
+	if sf, ok := m.files.LoadAndDelete(filePath); ok {
+		m.stats.TrackOpenFiles(-1)
+		return sf.Close()
 	}
-	m.files.Remove(filePath) // Calls evict callback
 	return nil
 }
 
 func (m *Manager) RemoveFile(filePath string) error {
-	if sf, exists := m.files.Peek(filePath); exists {
+	if sf, ok := m.files.LoadAndDelete(filePath); ok {
+		m.stats.TrackOpenFiles(-1)
 		if err := sf.removeFromDisk(); err != nil {
 			return err
 		}
-		m.stats.TrackOpenFiles(-1) // Decrement open file count
-		m.files.Remove(filePath)
 	}
 	return nil
 }
@@ -280,40 +274,47 @@ func (m *Manager) Cleanup(ctx context.Context) {
 // syncAllMetadata saves metadata for all dirty files
 // BUT: Only syncs files that haven't been accessed recently (not actively playing)
 func (m *Manager) syncAllMetadata() {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
 	now := time.Now()
 
 	// Iterate through all cached files
-	for _, key := range m.files.Keys() {
-		if sf, ok := m.files.Peek(key); ok {
-			// Only sync if dirty AND not recently accessed
-			// If file was accessed in last 10 seconds, skip (likely active playback)
-			sf.mu.RLock()
-			isDirty := sf.dirty
-			recentlyAccessed := now.Sub(sf.lastAccess) < 10*time.Second
-			hasRanges := sf.ranges != nil
-			sf.mu.RUnlock()
+	m.files.Range(func(key string, sf *SparseFile) bool {
+		// Only sync if dirty AND not recently accessed
+		// If file was accessed in last 10 seconds, skip (likely active playback)
+		sf.mu.RLock()
+		isDirty := sf.dirty
+		recentlyAccessed := now.Sub(sf.lastAccess) < 10*time.Second
+		hasRanges := sf.ranges != nil
+		sf.mu.RUnlock()
 
-			if !isDirty || !hasRanges || recentlyAccessed {
-				continue // Skip files that are clean, empty, or actively playing
-			}
-
-			// Sync in background to avoid blocking
-			go func(sparseFile *SparseFile) {
-				sparseFile.mu.Lock()
-				defer sparseFile.mu.Unlock()
-				if sparseFile.dirty && sparseFile.ranges != nil {
-					_ = sparseFile.saveMetadata()
-					sparseFile.dirty = false
-				}
-			}(sf)
+		if !isDirty || !hasRanges || recentlyAccessed {
+			return true // Skip files that are clean, empty, or actively playing
 		}
-	}
+
+		// Sync in background to avoid blocking
+		go func(sparseFile *SparseFile) {
+			sparseFile.mu.Lock()
+			defer sparseFile.mu.Unlock()
+			if sparseFile.dirty && sparseFile.ranges != nil {
+				_ = sparseFile.saveMetadata()
+				sparseFile.dirty = false
+			}
+		}(sf)
+
+		return true // Continue iteration
+	})
 }
 
 func (m *Manager) cleanup() {
+	// Quick check: if we have recent cached size and it's under limit, skip scan
+	now := time.Now().Unix()
+	lastCheck := m.lastSizeCheck.Load()
+	cachedSize := m.cachedDirSize.Load()
+
+	// If we checked recently (within 30s) and size is under 80% of limit, skip cleanup
+	if cachedSize > 0 && (now-lastCheck) < 30 && cachedSize < (m.config.CacheDiskSize*8/10) {
+		return
+	}
+
 	// Scan metadata directory first (much faster)
 	// Falls back to actual cache scan if needed
 	totalSize, fileList, err := m.scanMetadataDirectory()
@@ -460,16 +461,13 @@ func (m *Manager) getActualDiskUsage(path string, info os.FileInfo) (int64, erro
 
 // removeFile removes a file from both in-memory cache and disk (thread-safe)
 func (m *Manager) removeFile(cacheKey, diskPath string) error {
-	// First, remove from in-memory LRU cache (with locking)
+	// First, remove from in-memory cache
 	if cacheKey != "" {
-		m.mu.Lock()
-		if sf, exists := m.files.Peek(cacheKey); exists {
+		if sf, ok := m.files.LoadAndDelete(cacheKey); ok {
 			// Close the file cleanly before removing
 			_ = sf.Close()
-			m.files.Remove(cacheKey)
 			m.stats.TrackOpenFiles(-1)
 		}
-		m.mu.Unlock()
 	}
 
 	// Then remove from disk
@@ -525,14 +523,11 @@ func (m *Manager) GetStats() map[string]interface{} {
 
 // prefetchNextEpisode prefetches the beginning of the next episode
 func (m *Manager) prefetchNextEpisode(ctx context.Context, torrentName string, nextEpisode types.File) {
-	// Get or create sparse file for next episode
-	sf, err := m.GetOrCreateFile(torrentName, nextEpisode.Name, nextEpisode.Size)
+	// Create a File with download capabilities for next episode
+	f, err := m.CreateReader(torrentName, nextEpisode)
 	if err != nil {
 		return
 	}
-
-	// Create a reader for the next episode
-	reader := NewReader(m.debrid, torrentName, nextEpisode, sf, m.config.ChunkSize, m.config.ReadAheadSize, m.config.MaxConcurrentReads, m.stats, m)
 
 	// Prefetch first few chunks (enough for instant start of next episode)
 	numChunksToPrefetch := int64(3) // Prefetch first 3 chunks (24MB with 8MB chunks)
@@ -543,27 +538,29 @@ func (m *Manager) prefetchNextEpisode(ctx context.Context, torrentName string, n
 
 	// Download chunks in background
 	for chunkIdx := int64(0); chunkIdx < numChunksToPrefetch; chunkIdx++ {
-		go reader.downloadChunkAsync(ctx, chunkIdx)
+		go f.downloadChunkAsync(ctx, chunkIdx)
 	}
 }
 
 // === Utility Functions ===
 
+// Global replacer for path sanitization (avoids repeated allocations)
+var pathSanitizer = strings.NewReplacer(
+	"/", "_",
+	"\\", "_",
+	":", "_",
+	"*", "_",
+	"?", "_",
+	"\"", "_",
+	"<", "_",
+	">", "_",
+	"|", "_",
+)
+
 // sanitizeForPath makes a string safe for use in file paths
 func sanitizeForPath(name string) string {
 	// Replace problematic characters with underscores
-	replacer := strings.NewReplacer(
-		"/", "_",
-		"\\", "_",
-		":", "_",
-		"*", "_",
-		"?", "_",
-		"\"", "_",
-		"<", "_",
-		">", "_",
-		"|", "_",
-	)
-	sanitized := replacer.Replace(name)
+	sanitized := pathSanitizer.Replace(name)
 
 	// Limit length to prevent filesystem issues
 	if len(sanitized) > 200 {

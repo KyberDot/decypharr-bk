@@ -12,15 +12,12 @@ import (
 func (m *Manager) getFileAccessTime(cacheKey string, fileInfo os.FileInfo) time.Time {
 	// Try to get from in-memory tracking first
 	if cacheKey != "" {
-		m.mu.RLock()
-		if sf, ok := m.files.Peek(cacheKey); ok {
+		if sf, ok := m.files.Load(cacheKey); ok {
 			sf.mu.RLock()
 			accessTime := sf.lastAccess
 			sf.mu.RUnlock()
-			m.mu.RUnlock()
 			return accessTime
 		}
-		m.mu.RUnlock()
 	}
 
 	// Fallback: use file system access time (Linux/BSD)

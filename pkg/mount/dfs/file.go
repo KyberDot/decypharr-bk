@@ -3,6 +3,7 @@ package dfs
 import (
 	"context"
 	"io"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -33,11 +34,13 @@ func (f *File) IsRemote() bool {
 
 // FileHandle implements file operations with VFS
 type FileHandle struct {
-	file       *File
-	vfsHandle  *vfs.Handle
-	closed     atomic.Bool
-	lastAccess atomic.Int64
-	logger     zerolog.Logger
+	file         *File
+	vfsFile      *vfs.File // Direct file handle (no more Handle wrapper)
+	vfsOnce      sync.Once // Ensures VFS file created exactly once
+	vfsCreateErr error     // Stores any error from VFS file creation
+	closed       atomic.Bool
+	lastAccess   atomic.Int64
+	logger       zerolog.Logger
 }
 
 var _ = (fs.NodeOpener)((*File)(nil))
@@ -112,23 +115,30 @@ func (fh *FileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.Re
 		return fuse.ReadResultData(data), 0
 	}
 
-	// Lazy-create VFS handle on first read (not on Open)
+	// Lazy-create VFS file on first read (not on Open)
 	// This prevents unnecessary sparse file creation when file browsers
 	// just open files for metadata without actually reading content
-	if fh.vfsHandle == nil && fh.file.IsRemote() {
-		vfsHandle, err := fh.file.vfs.CreateReader(fh.file.torrentName, fh.file.torrentFile)
-		if err != nil {
+	// Uses sync.Once to ensure thread-safe creation
+	if fh.file.IsRemote() {
+		fh.vfsOnce.Do(func() {
+			var err error
+			fh.vfsFile, err = fh.file.vfs.CreateReader(fh.file.torrentName, fh.file.torrentFile)
+			fh.vfsCreateErr = err
+		})
+
+		// Check if creation failed
+		if fh.vfsCreateErr != nil {
 			return nil, syscall.EIO
 		}
-		fh.vfsHandle = vfsHandle
 	}
 
-	// Ensure we have a VFS handle
-	if fh.vfsHandle == nil {
+	// Ensure we have a VFS file
+	if fh.vfsFile == nil {
 		return nil, syscall.EIO
 	}
 
-	n, err := fh.vfsHandle.ReadAt(ctx, dest, off)
+	// Use ReadAtWithDownload for direct reading with download support
+	n, err := fh.vfsFile.ReadAtWithDownload(ctx, dest, off)
 	if err != nil && err != io.EOF {
 		return nil, syscall.EIO
 	}
@@ -154,10 +164,19 @@ func (fh *FileHandle) Release(ctx context.Context) syscall.Errno {
 		return 0
 	}
 
-	// Close VFS handle
-	if fh.vfsHandle != nil {
-		if err := fh.vfsHandle.Close(); err != nil {
-			fh.logger.Error().Err(err).Msg("failed to close VFS handle")
+	// Close VFS file
+	// Note: We DON'T decrement the counter here because:
+	// 1. Counter is incremented when File is created (CreateReader)
+	// 2. Counter is decremented when File is evicted from cache or explicitly closed
+	// 3. Multiple FileHandles can reference the same File (via cache)
+	// 4. Decrementing here would cause double-decrement when cache evicts the file
+	//
+	// We also DON'T call vfsFile.Close() because that would stop all downloads
+	// and close the file descriptor. The file is shared and managed by the cache.
+	// Just sync any pending writes.
+	if fh.vfsFile != nil {
+		if err := fh.vfsFile.Sync(); err != nil {
+			fh.logger.Error().Err(err).Msg("failed to sync VFS file")
 		}
 	}
 

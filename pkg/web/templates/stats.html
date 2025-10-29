@@ -90,10 +90,6 @@
                             <i class="bi bi-arrow-right"></i>
                             View Rclone Logs
                         </a>
-                        <a href="{{.URLBase}}debug/logs/dfs" class="btn btn-sm btn-outline" target="_blank" id="dfs-logs-btn" style="display: none;">
-                            <i class="bi bi-arrow-right"></i>
-                            View DFS Logs
-                        </a>
                     </div>
                 </div>
                 <div class="flex gap-2">
@@ -153,7 +149,6 @@
             const mountStatus = document.getElementById('mount-status');
             const mountContent = document.getElementById('mount-content');
             const rcloneLogsBtn = document.getElementById('rclone-logs-btn');
-            const dfsLogsBtn = document.getElementById('dfs-logs-btn');
 
             // Determine mount type (rclone, dfs, or external)
             let type = 'None';
@@ -161,15 +156,12 @@
             if (mountData && mountData.type === "rclone" && mountData.enabled) {
                 type = 'Rclone';
                 rcloneLogsBtn.style.display = 'inline-flex';
-                dfsLogsBtn.style.display = 'none';
             } else if (mountData && mountData.type === "dfs" && mountData.enabled) {
                 type = 'DFS';
                 rcloneLogsBtn.style.display = 'none';
-                dfsLogsBtn.style.display = 'inline-flex';
             } else if (mountData && mountData.type === "external") {
                 type = 'External';
                 rcloneLogsBtn.style.display = 'inline-flex';
-                dfsLogsBtn.style.display = 'none';
             }
 
             mountType.textContent = type;
