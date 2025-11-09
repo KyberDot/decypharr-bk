@@ -48,9 +48,7 @@ func (m *Manager) AddNewTorrent(ctx context.Context, importReq *ImportRequest) e
 		return fmt.Errorf("failed to save torrent: %w", err)
 	}
 
-	var (
-		debridTorrent *debridTypes.Torrent
-	)
+	var debridTorrent *debridTypes.Torrent
 
 	// Check if already exists in storage/It's already download
 	existing, err := m.storage.Get(torrent.InfoHash)
@@ -59,7 +57,7 @@ func (m *Manager) AddNewTorrent(ctx context.Context, importReq *ImportRequest) e
 			Str("name", torrent.Name).
 			Str("info_hash", torrent.InfoHash).
 			Msg("Torrent already exists in storage, skipping submitting to debrid")
-		placement := existing.GetActivePlacement()
+		placement := existing.GetActivePlacement(torrent.InfoHash)
 		if placement != nil {
 			client := m.DebridClient(placement.Debrid)
 			if client != nil {
@@ -125,8 +123,7 @@ func (m *Manager) processQueuedTorrents(ctx context.Context) {
 }
 
 func (m *Manager) processQueuedTorrent(ctx context.Context, torrent *storage.Torrent) {
-
-	placement := torrent.GetActivePlacement()
+	placement := torrent.GetActivePlacement(torrent.InfoHash)
 	if placement == nil {
 		m.logger.Error().Str("name", torrent.Name).Msg("No active placement found for queued torrent")
 		torrent.MarkAsError(fmt.Errorf("no active placement found"))
@@ -203,7 +200,7 @@ func (m *Manager) processQueuedTorrent(ctx context.Context, torrent *storage.Tor
 	torrent.UpdatedAt = time.Now()
 
 	// Update placement progress
-	if placement := torrent.GetActivePlacement(); placement != nil {
+	if placement := torrent.GetActivePlacement(debridTorrent.InfoHash); placement != nil {
 		placement.Progress = torrent.Progress
 	}
 
@@ -275,6 +272,8 @@ func (m *Manager) processNewTorrent(ctx context.Context, torrent *storage.Torren
 			ByteRange: file.ByteRange,
 			Deleted:   file.Deleted,
 			IsRar:     file.IsRar,
+			InfoHash:  torrent.InfoHash,
+			Debrid:    debridTorrent.Debrid,
 		}
 		torrent.Files[file.Name] = tFile
 	}
@@ -295,7 +294,7 @@ func (m *Manager) processNewTorrent(ctx context.Context, torrent *storage.Torren
 	}
 
 	// Mark placement as downloaded
-	if placement := torrent.GetActivePlacement(); placement != nil {
+	if placement := torrent.GetActivePlacement(debridTorrent.InfoHash); placement != nil {
 		now := time.Now()
 		placement.DownloadedAt = &now
 		placement.Progress = 1.0

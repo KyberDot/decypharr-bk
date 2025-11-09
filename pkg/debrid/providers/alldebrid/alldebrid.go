@@ -247,6 +247,9 @@ func (ad *AllDebrid) UpdateTorrent(t *types.Torrent) error {
 	t.Debrid = ad.config.Name
 	t.Bytes = data.Size
 	t.Seeders = data.Seeders
+	if data.Hash != "" {
+		t.InfoHash = data.Hash
+	}
 	t.Added = time.Unix(data.CompletionDate, 0).Format(time.RFC3339)
 	if status == "downloaded" {
 		t.Progress = 100

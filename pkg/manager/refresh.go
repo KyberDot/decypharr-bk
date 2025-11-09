@@ -32,11 +32,16 @@ func (m *Manager) refreshTorrents(ctx context.Context, debridName string, debrid
 		m.logger.Debug().Str("debrid", debridName).Msg("Starting torrent refresh")
 
 		// Fetch torrents from this debrid client
+		timer := time.Now()
 		torrents, err := debridClient.GetTorrents()
 		if err != nil {
 			m.logger.Error().Err(err).Str("debrid", debridName).Msg("Failed to get torrents")
 			return nil, err
 		}
+		m.logger.Debug().
+			Str("debrid", debridName).
+			Int("count", len(torrents)).
+			Msgf("Found %d torrents. Took %s", len(torrents), time.Since(timer))
 
 		if len(torrents) == 0 {
 			m.logger.Debug().Str("debrid", debridName).Msg("No torrents found")
@@ -64,11 +69,14 @@ func (m *Manager) refreshTorrents(ctx context.Context, debridName string, debrid
 		// Check for deleted placements on this debrid
 		deletedPlacements := make([]struct{ infohash, debridName string }, 0)
 		cachedMap.Range(func(key string, cached *storage.Torrent) bool {
-			placement, hasPlacement := cached.Placements[debridName]
-			if hasPlacement {
-				// Check if this placement still exists on the debrid
-				if _, exists := currentTorrentIds[placement.ID]; !exists {
-					deletedPlacements = append(deletedPlacements, struct{ infohash, debridName string }{cached.InfoHash, debridName})
+			// Find placement(s) for this debrid
+			for _, placement := range cached.Placements {
+				if placement.Debrid == debridName {
+					// Check if this placement still exists on the debrid
+					if _, exists := currentTorrentIds[placement.ID]; !exists {
+						deletedPlacements = append(deletedPlacements, struct{ infohash, debridName string }{cached.InfoHash, debridName})
+					}
+					break // Only need to check one placement per debrid
 				}
 			}
 			return true
@@ -109,8 +117,10 @@ func (m *Manager) refreshTorrents(ctx context.Context, debridName string, debrid
 				newTorrents = append(newTorrents, t)
 			} else {
 				// Update existing placement progress/status
-				placement := cached.Placements[debridName]
-				if placement.ID == t.Id {
+				// Find placement for this debrid and infohash
+				placementKey := storage.GetPlacementKey(debridName, t.InfoHash)
+				placement := cached.Placements[placementKey]
+				if placement != nil && placement.ID == t.Id {
 					placement.Status = t.Status
 					placement.Progress = t.Progress
 					_ = m.AddOrUpdate(cached, nil)
@@ -239,6 +249,8 @@ func (m *Manager) processSyncTorrent(t *types.Torrent, cachedMap *xsync.Map[stri
 				IsRar:     f.IsRar,
 				ByteRange: f.ByteRange,
 				Deleted:   f.Deleted,
+				InfoHash:  t.InfoHash,
+				Debrid:    t.Debrid,
 			}
 		}
 	}
@@ -287,7 +299,7 @@ func (m *Manager) refreshTorrent(infohash string) (*storage.Torrent, error) {
 		return torrent, nil
 	}
 
-	placement := torrent.GetActivePlacement()
+	placement := torrent.GetActivePlacement(infohash)
 	if placement == nil {
 		return torrent, nil
 	}
@@ -311,6 +323,8 @@ func (m *Manager) refreshTorrent(infohash string) (*storage.Torrent, error) {
 				IsRar:     f.IsRar,
 				ByteRange: f.ByteRange,
 				Deleted:   f.Deleted,
+				InfoHash:  debridTorrent.InfoHash,
+				Debrid:    debridTorrent.Debrid,
 			}
 		}
 	}

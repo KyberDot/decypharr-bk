@@ -39,7 +39,6 @@ func (h *Handler) StreamResponse(info *manager.FileInfo, w http.ResponseWriter, 
 
 	resp, err := h.manager.Stream(r.Context(), info.Parent(), info.Name(), start, end)
 	if err != nil {
-		h.logger.Error().Err(err).Str("file", info.Name()).Msg("Failed to stream with initial link")
 		return &streamError{Err: err, StatusCode: http.StatusRequestedRangeNotSatisfiable}
 	}
 	defer func(body io.ReadCloser) {

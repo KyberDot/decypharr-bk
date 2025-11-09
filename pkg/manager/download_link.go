@@ -74,9 +74,33 @@ func (m *Manager) GetDownloadLink(torrent *storage.Torrent, filename string) (ty
 
 // getPlacementFile retrieves the placement file with refresh/repair fallback
 func (m *Manager) getPlacementFile(torrent *storage.Torrent, debridName, filename string) (*storage.PlacementFile, error) {
-	placement := torrent.Placements[debridName]
+	// Get the file to determine which infohash and debrid it belongs to
+	file, ok := torrent.Files[filename]
+	if !ok {
+		return nil, fmt.Errorf("file %s not found in torrent", filename)
+	}
+
+	// Use file's metadata to find the correct placement
+	fileInfoHash := file.InfoHash
+	if fileInfoHash == "" {
+		// Fallback to torrent's primary infohash
+		fileInfoHash = torrent.InfoHash
+	}
+
+	fileDebrid := file.Debrid
+	if fileDebrid == "" {
+		// Fallback to provided debridName or torrent's active debrid
+		fileDebrid = debridName
+		if fileDebrid == "" {
+			fileDebrid = torrent.ActiveDebrid
+		}
+	}
+
+	// Get the placement using the composite key
+	placementKey := storage.GetPlacementKey(fileDebrid, fileInfoHash)
+	placement := torrent.Placements[placementKey]
 	if placement == nil {
-		return nil, fmt.Errorf("no placement found for debrid %s", debridName)
+		return nil, fmt.Errorf("no placement found for debrid %s with infohash %s (key: %s)", fileDebrid, fileInfoHash, placementKey)
 	}
 
 	// Get placement-specific file info
@@ -87,16 +111,29 @@ func (m *Manager) getPlacementFile(torrent *storage.Torrent, debridName, filenam
 		if err != nil {
 			return nil, fmt.Errorf("failed to refresh torrent: %w", err)
 		}
-		torrent = refreshed
-		placement = torrent.Placements[debridName]
-		if placement == nil {
-			return nil, fmt.Errorf("placement disappeared after refresh for debrid %s", debridName)
+
+		// Re-fetch file and placement after refresh
+		file = refreshed.Files[filename]
+		if file == nil {
+			return nil, fmt.Errorf("file disappeared after refresh")
 		}
+
+		fileInfoHash = file.InfoHash
+		if fileInfoHash == "" {
+			fileInfoHash = refreshed.InfoHash
+		}
+
+		placementKey = storage.GetPlacementKey(fileDebrid, fileInfoHash)
+		placement = refreshed.Placements[placementKey]
+		if placement == nil {
+			return nil, fmt.Errorf("placement disappeared after refresh for key %s", placementKey)
+		}
+
 		placementFile = placement.Files[filename]
 
-		// Still missing after refresh? Try repair
+		// Still missing after refresh?
 		if placementFile == nil || (placementFile.Link == "" && placementFile.Id == "") {
-			return nil, fmt.Errorf("file %s not available after refresh and repair", filename)
+			return nil, fmt.Errorf("file %s not available after refresh", filename)
 		}
 	}
 
@@ -112,9 +149,21 @@ func (m *Manager) fetchDownloadLink(torrent *storage.Torrent, file *storage.File
 		return emptyDownloadLink, fmt.Errorf("debrid client not found: %s", debridName)
 	}
 
-	placement := torrent.Placements[debridName]
+	// Get the placement using file's infohash and debrid
+	fileInfoHash := file.InfoHash
+	if fileInfoHash == "" {
+		fileInfoHash = torrent.InfoHash
+	}
+
+	fileDebrid := file.Debrid
+	if fileDebrid == "" {
+		fileDebrid = debridName
+	}
+
+	placementKey := storage.GetPlacementKey(fileDebrid, fileInfoHash)
+	placement := torrent.Placements[placementKey]
 	if placement == nil {
-		return emptyDownloadLink, fmt.Errorf("no placement found for debrid %s", debridName)
+		return emptyDownloadLink, fmt.Errorf("no placement found for key %s", placementKey)
 	}
 
 	// Convert to types.File for client call
@@ -189,33 +238,6 @@ func (m *Manager) checkDownloadLink(link string, debridName string) (types.Downl
 	}
 
 	return types.DownloadLink{}, fmt.Errorf("download link not found for %s", link)
-}
-
-// GetFileDownloadLinks generates download links for all files in a torrent
-func (m *Manager) GetFileDownloadLinks(torrent *storage.Torrent) (map[string]types.DownloadLink, error) {
-	if torrent.ActiveDebrid == "" {
-		return nil, fmt.Errorf("no active debrid for torrent")
-	}
-
-	client := m.DebridClient(torrent.ActiveDebrid)
-	if client == nil {
-		return nil, fmt.Errorf("debrid client not found: %s", torrent.ActiveDebrid)
-	}
-
-	placement := torrent.GetActivePlacement()
-	if placement == nil {
-		return nil, fmt.Errorf("no active placement found")
-	}
-
-	// Build debrid torrent
-	debridTorrent := &types.Torrent{
-		Id:       placement.ID,
-		InfoHash: torrent.InfoHash,
-		Name:     torrent.Name,
-		Debrid:   torrent.ActiveDebrid,
-	}
-
-	return client.GetFileDownloadLinks(debridTorrent)
 }
 
 // IncrementFailedLinkCounter increments the failure counter for a link

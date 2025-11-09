@@ -16,23 +16,44 @@ func (s *Storage) AddOrUpdate(torrent *Torrent) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		cachedBkt := tx.Bucket([]byte(cachedBucket))
 		nameIdxBkt := tx.Bucket([]byte(nameIndexBucket))
-		if cachedBkt == nil || nameIdxBkt == nil {
-			return fmt.Errorf("required buckets not found")
+
+		nameKey := []byte(torrent.GetFolder())
+		existingInfoHash := nameIdxBkt.Get(nameKey)
+
+		// CHECK FOR NAME COLLISION
+		if existingInfoHash != nil && string(existingInfoHash) != torrent.InfoHash {
+			existing, err := s.Get(string(existingInfoHash))
+			if err == nil {
+				s.logger.Debug().
+					Str("name", torrent.GetFolder()).
+					Str("existing_hash", existing.InfoHash).
+					Str("new_hash", torrent.InfoHash).
+					Msg("Merging torrents with same name")
+
+				// MERGE THE TORRENTS
+				merged := MergeTorrents(existing, torrent)
+
+				// Save merged version under existing infohash
+				data, _ := msgpack.Marshal(merged)
+				if err := cachedBkt.Put([]byte(existing.InfoHash), data); err != nil {
+					return err
+				}
+
+				// Name index still points to existing infohash
+				return nil
+			}
 		}
 
+		// No merge - regular save
 		data, err := msgpack.Marshal(torrent)
 		if err != nil {
 			return fmt.Errorf("failed to marshal torrent: %w", err)
 		}
 
-		// Store main key: infohash -> torrent data
-		key := []byte(torrent.InfoHash)
-		if err := cachedBkt.Put(key, data); err != nil {
+		if err := cachedBkt.Put([]byte(torrent.InfoHash), data); err != nil {
 			return fmt.Errorf("failed to set torrent: %w", err)
 		}
 
-		// Store name index: folder name -> infohash
-		nameKey := []byte(torrent.GetFolder())
 		if err := nameIdxBkt.Put(nameKey, []byte(torrent.InfoHash)); err != nil {
 			return fmt.Errorf("failed to set name index: %w", err)
 		}

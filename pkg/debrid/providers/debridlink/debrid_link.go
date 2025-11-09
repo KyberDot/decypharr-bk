@@ -220,6 +220,9 @@ func (dl *DebridLink) UpdateTorrent(t *types.Torrent) error {
 	t.Seeders = data.PeersConnected
 	t.Filename = name
 	t.OriginalFilename = name
+	if data.HashString != "" {
+		t.InfoHash = data.HashString
+	}
 	t.Added = time.Unix(data.Created, 0).Format(time.RFC3339)
 	cfg := config.Get()
 	now := time.Now()

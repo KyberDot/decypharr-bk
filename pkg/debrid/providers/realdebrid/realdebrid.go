@@ -516,12 +516,16 @@ func (r *RealDebrid) CheckStatus(t *types.Torrent) (*types.Torrent, error) {
 		t.OriginalFilename = data.OriginalFilename
 		t.Bytes = data.Bytes
 		t.Progress = data.Progress
+
 		t.Speed = data.Speed
 		t.Seeders = data.Seeders
 		t.Links = data.Links
 		t.Status = getStatus(debridStatus)
 		t.Debrid = r.config.Name
 		t.Added = data.Added
+		if data.Hash != "" {
+			t.InfoHash = data.Hash
+		}
 		if debridStatus == "waiting_files_selection" {
 			t.Status = types.TorrentStatusDownloading
 			t.Files = r.getTorrentFiles(t, data)

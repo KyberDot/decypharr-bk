@@ -75,6 +75,8 @@ func convertToMultiSeason(torrent *storage.Torrent, seasons []SeasonInfo) []*sto
 				ByteRange: file.ByteRange,
 				Deleted:   file.Deleted,
 				IsRar:     file.IsRar,
+				InfoHash:  file.InfoHash,
+				Debrid:    file.Debrid,
 			}
 			size += file.Size
 		}

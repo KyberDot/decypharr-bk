@@ -305,6 +305,9 @@ func (tb *Torbox) UpdateTorrent(t *types.Torrent) error {
 	t.Seeders = data.Seeds
 	t.Filename = name
 	t.OriginalFilename = name
+	if data.Hash != "" {
+		t.InfoHash = data.Hash
+	}
 	t.Debrid = tb.config.Name
 
 	// Clear existing files map to rebuild it

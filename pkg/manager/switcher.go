@@ -93,10 +93,18 @@ func (m *Manager) executeMigration(ctx context.Context, job *storage.SwitcherJob
 	// This removes the old placement
 	if !job.KeepOld {
 		// Archive and optionally delete from source
-		sourcePlacement, ok := torrent.Placements[job.SourceDebrid]
-		if ok && sourcePlacement != nil {
+		// Find source placement for this debrid
+		var sourcePlacement *storage.Placement
+		for _, p := range torrent.Placements {
+			if p.Debrid == job.SourceDebrid {
+				sourcePlacement = p
+				break
+			}
+		}
+
+		if sourcePlacement != nil {
 			torrent.RemovePlacement(job.SourceDebrid, func(placement *storage.Placement) error {
-				return m.RemoveFromDebrid(sourcePlacement)
+				return m.RemoveFromDebrid(placement)
 			})
 		}
 	}

@@ -52,8 +52,6 @@ func (m *Migrator) Start() error {
 		return fmt.Errorf("failed to load cache torrents: %w", err)
 	}
 
-	m.logger.Info().Int("count", len(cachedTorrents)).Msg("Loaded cache torrents")
-
 	// Initialize migration status
 	status := &storage.SystemMigrationStatus{
 		Running:   true,
@@ -192,12 +190,6 @@ func (m *Migrator) runMigration(ctx context.Context, cachedTorrents map[string][
 			status.ErrorList = append(status.ErrorList, fmt.Sprintf("Failed to add %s: %v", managed.Name, err))
 			continue
 		}
-
-		m.logger.Info().
-			Str("name", managed.Name).
-			Str("infohash", managed.InfoHash).
-			Int("placements", len(managed.Placements)).
-			Msg("Migrated torrent")
 		status.Completed++
 		status.UpdatedAt = time.Now()
 
@@ -248,8 +240,6 @@ func (m *Migrator) loadCacheTorrents() (map[string][]*storage.CachedTorrent, err
 		debridName := debridDir.Name()
 		debridPath := filepath.Join(m.cacheDir, debridName)
 
-		m.logger.Debug().Str("debrid", debridName).Str("path", debridPath).Msg("Reading debrid cache")
-
 		// Read all JSON files in this debrid directory
 		files, err := os.ReadDir(debridPath)
 		if err != nil {
@@ -291,11 +281,6 @@ func (m *Migrator) loadCacheTorrents() (map[string][]*storage.CachedTorrent, err
 			// Group by infohash
 			torrentsByHash[cached.InfoHash] = append(torrentsByHash[cached.InfoHash], &cached)
 		}
-
-		m.logger.Info().
-			Str("debrid", debridName).
-			Int("files", len(files)).
-			Msg("Processed debrid cache files")
 	}
 
 	return torrentsByHash, nil
@@ -315,8 +300,9 @@ func (m *Migrator) mergeCachedTorrents(cachedList []*storage.CachedTorrent) (*st
 	for i := 1; i < len(cachedList); i++ {
 		other := cachedList[i]
 
-		// Skip if same debrid (shouldn't happen, but just in case)
-		if _, exists := managed.Placements[other.Debrid]; exists {
+		// Check if placement already exists for this debrid+infohash combo
+		placementKey := storage.GetPlacementKey(other.Debrid, other.InfoHash)
+		if _, exists := managed.Placements[placementKey]; exists {
 			continue
 		}
 
@@ -336,6 +322,7 @@ func (m *Migrator) mergeCachedTorrents(cachedList []*storage.CachedTorrent) (*st
 
 		// Create placement
 		placement := &storage.Placement{
+			Debrid:   other.Debrid,
 			ID:       other.ID,
 			AddedAt:  addedAt,
 			Status:   status,
@@ -349,7 +336,7 @@ func (m *Migrator) mergeCachedTorrents(cachedList []*storage.CachedTorrent) (*st
 			placement.DownloadedAt = &downloadedAt
 		}
 
-		managed.Placements[other.Debrid] = placement
+		managed.Placements[placementKey] = placement
 
 		// Merge files - add any files not in the base and populate placement files
 		if other.Files != nil {
@@ -361,6 +348,8 @@ func (m *Migrator) mergeCachedTorrents(cachedList []*storage.CachedTorrent) (*st
 						Size:      file.Size,
 						ByteRange: file.ByteRange,
 						Deleted:   file.Deleted,
+						InfoHash:  other.InfoHash, // Track which torrent this file came from
+						Debrid:    other.Debrid,   // Track which debrid has this file
 					}
 				}
 

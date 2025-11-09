@@ -309,6 +309,8 @@ func (m *Manager) processTorrent(t *types.Torrent, cachedTorrents map[string]*st
 				IsRar:     f.IsRar,
 				ByteRange: f.ByteRange,
 				Deleted:   f.Deleted,
+				InfoHash:  t.InfoHash,
+				Debrid:    t.Debrid,
 			}
 		}
 	}

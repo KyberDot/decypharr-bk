@@ -47,7 +47,7 @@ type Torrent struct {
 
 	// Multi-Debrid Placement Strategy
 	ActiveDebrid string                `msgpack:"active_debrid" json:"active_debrid"` // Current active debrid
-	Placements   map[string]*Placement `msgpack:"placements" json:"placements"`       // debrid_name:infohash -> Placement details
+	Placements   map[string]*Placement `msgpack:"placements" json:"placements"`       // "{debrid}:{infohash}" -> Placement details
 
 	// Files (from debrid cache)
 	Files map[string]*File `msgpack:"files" json:"files"` // filename -> File details
@@ -95,6 +95,8 @@ type File struct {
 	IsRar     bool      `msgpack:"is_rar" json:"is_rar"`
 	ByteRange *[2]int64 `msgpack:"byte_range,omitempty" json:"byte_range,omitempty"`
 	Deleted   bool      `msgpack:"deleted" json:"deleted"`
+	InfoHash  string    `msgpack:"infohash,omitempty" json:"infohash,omitempty"` // Which torrent this file came from
+	Debrid    string    `msgpack:"debrid,omitempty" json:"debrid,omitempty"`     // Which debrid service has this file
 }
 
 // PlacementFile represents debrid-specific file information
@@ -134,11 +136,25 @@ func (p *Placement) IsValid() bool {
 }
 
 // GetActivePlacement returns the active placement
-func (t *Torrent) GetActivePlacement() *Placement {
-	if t.ActiveDebrid == "" || t.Placements == nil {
+func (t *Torrent) GetActivePlacement(infohash string) *Placement {
+	if t.Placements == nil || t.ActiveDebrid == "" {
 		return nil
 	}
-	return t.Placements[t.ActiveDebrid]
+
+	if infohash == "" {
+		infohash = t.InfoHash
+	}
+	key := GetPlacementKey(t.ActiveDebrid, infohash)
+	placement, exists := t.Placements[key]
+	if !exists {
+		return nil
+	}
+	return placement
+}
+
+// GetPlacementKey returns the placement key for a debrid and infohash
+func GetPlacementKey(debridName, infohash string) string {
+	return fmt.Sprintf("%s:%s", debridName, infohash)
 }
 
 // AddPlacement adds or updates a placement for a debrid
@@ -155,17 +171,31 @@ func (t *Torrent) AddPlacement(debridTorrent *debridTypes.Torrent) *Placement {
 		Files:   make(map[string]*PlacementFile),
 	}
 
-	t.Placements[debridTorrent.Debrid] = placement
+	key := GetPlacementKey(debridTorrent.Debrid, debridTorrent.InfoHash)
+	t.Placements[key] = placement
 	return placement
 }
 
 // ActivatePlacement switches the active debrid
 func (t *Torrent) ActivatePlacement(debridName string) error {
-	if t.Placements == nil || t.Placements[debridName] == nil {
+	if t.Placements == nil {
 		return ErrPlacementNotFound
 	}
 
-	if t.Placements[debridName].Status != debridTypes.TorrentStatusDownloaded {
+	// Find any placement with this debrid name
+	var foundPlacement *Placement
+	for _, placement := range t.Placements {
+		if placement.Debrid == debridName {
+			foundPlacement = placement
+			break
+		}
+	}
+
+	if foundPlacement == nil {
+		return ErrPlacementNotFound
+	}
+
+	if foundPlacement.Status != debridTypes.TorrentStatusDownloaded {
 		return ErrPlacementNotCompleted
 	}
 
@@ -177,23 +207,36 @@ func (t *Torrent) ActivatePlacement(debridName string) error {
 
 // RemovePlacement deletes a debrid torrent from the debrid itself
 func (t *Torrent) RemovePlacement(debridName string, cleanup func(placement *Placement) error) {
-	if t.Placements == nil || t.Placements[debridName] == nil {
+	if t.Placements == nil {
 		return
 	}
-	// Get the placement
-	placement := t.Placements[debridName]
 
-	// We want to remove the placement
-	delete(t.Placements, debridName)
+	// Find and remove all placements with this debrid name
+	var keysToDelete []string
+	var placementsToCleanup []*Placement
+
+	for key, placement := range t.Placements {
+		if placement.Debrid == debridName {
+			keysToDelete = append(keysToDelete, key)
+			placementsToCleanup = append(placementsToCleanup, placement)
+		}
+	}
+
+	// Delete the placements
+	for _, key := range keysToDelete {
+		delete(t.Placements, key)
+	}
 
 	// If the placement is the active placement, find a new active placement
 	if t.ActiveDebrid == debridName {
 		t.SwitchToNextPlacement()
 	}
 
-	// Call cleanup function if provided
+	// Call cleanup function for each placement if provided
 	if cleanup != nil {
-		_ = cleanup(placement)
+		for _, placement := range placementsToCleanup {
+			_ = cleanup(placement)
+		}
 	}
 }
 
@@ -202,8 +245,12 @@ func (t *Torrent) HasPlacement(debridName string) bool {
 	if t.Placements == nil {
 		return false
 	}
-	_, exists := t.Placements[debridName]
-	return exists
+	for _, placement := range t.Placements {
+		if placement.Debrid == debridName {
+			return true
+		}
+	}
+	return false
 }
 
 // SwitchToNextPlacement switches to the next completed placement if available
@@ -211,9 +258,10 @@ func (t *Torrent) SwitchToNextPlacement() {
 	if t.Placements == nil {
 		return
 	}
-	for debridName, placement := range t.Placements {
+	for _, placement := range t.Placements {
 		if placement.Status == debridTypes.TorrentStatusDownloaded {
-			_ = t.ActivatePlacement(debridName)
+			_ = t.ActivatePlacement(placement.Debrid)
+			return
 		}
 	}
 }
@@ -300,7 +348,7 @@ func (t *Torrent) IsValid() bool {
 	if t.Placements == nil || len(t.Placements) == 0 {
 		return false
 	}
-	activePlacement := t.GetActivePlacement()
+	activePlacement := t.GetActivePlacement(t.InfoHash)
 	if activePlacement == nil {
 		return false
 	}
@@ -421,6 +469,8 @@ func (ct *CachedTorrent) ToManagedTorrent() *Torrent {
 			Size:      f.Size,
 			IsRar:     f.IsRar,
 			ByteRange: f.ByteRange,
+			InfoHash:  ct.InfoHash, // Track which torrent this file came from
+			Debrid:    ct.Debrid,   // Track which debrid has this file
 		}
 	}
 
@@ -457,7 +507,9 @@ func (ct *CachedTorrent) ToManagedTorrent() *Torrent {
 			}
 		}
 
-		mt.Placements[ct.Debrid] = placement
+		// Use composite key for placement
+		placementKey := GetPlacementKey(ct.Debrid, ct.InfoHash)
+		mt.Placements[placementKey] = placement
 	}
 
 	// Set completion timestamp if complete
@@ -487,4 +539,124 @@ func GetTorrentFolder(folderNaming config.WebDavFolderNaming, torrent *Torrent) 
 	}
 	torrent.Folder = folder
 	return folder
+}
+
+// MergeTorrents merges two torrents with the same folder name.
+// The existing torrent is updated with placements and files from the new torrent.
+// Files are merged by name, with preference given based on size and timestamp.
+//
+// Parameters:
+//   - existing: The torrent that already exists in storage (will be modified)
+//   - new: The new torrent being added
+//
+// Returns:
+//   - The merged torrent (same as existing, but modified)
+//
+// Merge Strategy:
+//  1. Placements: All placements from both torrents are preserved with keys "{debrid}:{infohash}"
+//  2. Files: For duplicate filenames, keep the larger or newer file
+//  3. Metadata: Use the earlier AddedOn time, preserve both infohashes via File.InfoHash
+func MergeTorrents(existing, new *Torrent) *Torrent {
+	// Mark as having duplicates
+	existing.HasDuplicates = true
+
+	// Initialize maps if needed
+	if existing.Placements == nil {
+		existing.Placements = make(map[string]*Placement)
+	}
+	if existing.Files == nil {
+		existing.Files = make(map[string]*File)
+	}
+
+	// Merge placements from new torrent
+	// Key format: "{debrid}:{infohash}"
+	for key, newPlacement := range new.Placements {
+		// Since keys are unique per debrid:infohash combo, we can directly add
+		// Only merge if the exact same key doesn't exist
+		if _, exists := existing.Placements[key]; !exists {
+			existing.Placements[key] = newPlacement
+		}
+	}
+
+	// Merge files - handle duplicates intelligently
+	for fileName, newFile := range new.Files {
+		existingFile, fileExists := existing.Files[fileName]
+
+		if !fileExists {
+			// New file doesn't exist in existing torrent - add it
+			newFileCopy := *newFile
+			// Set source metadata if not already set
+			if newFileCopy.InfoHash == "" {
+				newFileCopy.InfoHash = new.InfoHash
+			}
+			if newFileCopy.Debrid == "" {
+				newFileCopy.Debrid = new.ActiveDebrid
+			}
+			existing.Files[fileName] = &newFileCopy
+		} else {
+			// File with same name exists - decide which to keep
+			shouldReplace := false
+
+			// Strategy 1: Prefer larger files (better quality/more complete)
+			if newFile.Size > existingFile.Size {
+				shouldReplace = true
+			} else if newFile.Size == existingFile.Size {
+				// Strategy 2: If same size, prefer newer torrent
+				if new.AddedOn.After(existing.AddedOn) {
+					shouldReplace = true
+				}
+			}
+
+			if shouldReplace {
+				newFileCopy := *newFile
+				// Set source metadata if not already set
+				if newFileCopy.InfoHash == "" {
+					newFileCopy.InfoHash = new.InfoHash
+				}
+				if newFileCopy.Debrid == "" {
+					newFileCopy.Debrid = new.ActiveDebrid
+				}
+				existing.Files[fileName] = &newFileCopy
+			}
+			// If not replacing, keep existing file as-is (it already has InfoHash/Debrid set)
+		}
+	}
+
+	// Update metadata
+	// Keep the earlier AddedOn time (represents when this content was first added)
+	if new.AddedOn.Before(existing.AddedOn) {
+		existing.AddedOn = new.AddedOn
+	}
+
+	// Update size to reflect merged files
+	var totalSize int64
+	for _, file := range existing.Files {
+		if !file.Deleted {
+			totalSize += file.Size
+		}
+	}
+	existing.Size = totalSize
+	existing.Bytes = totalSize
+
+	// If new torrent has a valid active debrid and existing doesn't, use it
+	if existing.ActiveDebrid == "" && new.ActiveDebrid != "" {
+		existing.ActiveDebrid = new.ActiveDebrid
+	}
+
+	// Merge tags
+	if len(new.Tags) > 0 {
+		tagMap := make(map[string]bool)
+		for _, tag := range existing.Tags {
+			tagMap[tag] = true
+		}
+		for _, tag := range new.Tags {
+			if !tagMap[tag] {
+				existing.Tags = append(existing.Tags, tag)
+			}
+		}
+	}
+
+	existing.UpdatedAt = time.Now()
+
+	return existing
 }

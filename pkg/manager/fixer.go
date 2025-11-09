@@ -209,7 +209,9 @@ func (f *Fixer) MoveTorrent(torrent *storage.Torrent, debridName string, reinser
 	}
 
 	// Check if placement already exists on this debrid
-	placement, hasPlacement := torrent.Placements[debridName]
+	// Find placement for this debrid and torrent's infohash
+	placementKey := storage.GetPlacementKey(debridName, torrent.InfoHash)
+	placement, hasPlacement := torrent.Placements[placementKey]
 	var oldID string
 	if hasPlacement && placement != nil && placement.ID != "" && !reinsert {
 		// Activate the existing placement
@@ -294,6 +296,8 @@ func (f *Fixer) MoveTorrent(torrent *storage.Torrent, debridName string, reinser
 				IsRar:     f.IsRar,
 				ByteRange: f.ByteRange,
 				Deleted:   f.Deleted,
+				InfoHash:  torrent.InfoHash,
+				Debrid:    debridName,
 			}
 		}
 	}

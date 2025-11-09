@@ -100,10 +100,6 @@ func (m *Manager) Stream(ctx context.Context, torrentName, filename string, star
 		if err != nil {
 			// Network/connection error
 			lastErr = err
-			m.logger.Trace().
-				Int("retries", retry).
-				Err(err).
-				Msg("Network request failed, retrying")
 
 			// Backoff and continue network retry
 			if retry < m.config.Retries {

@@ -35,33 +35,9 @@ func (m *Manager) GetBrokenFiles(torrent *storage.Torrent, filenames []string) [
 	}
 
 	// First pass: check for missing links and refresh if needed
-	placement := torrent.GetActivePlacement()
+	placement := torrent.GetActivePlacement(torrent.InfoHash)
 	if placement == nil {
 		return filenames
-	}
-
-	needsRefresh := false
-	for name := range files {
-		placementFile := placement.Files[name]
-		if placementFile == nil || (placementFile.Link == "" && placementFile.Id == "") {
-			needsRefresh = true
-			break
-		}
-	}
-
-	// Refresh torrent if any files are missing links
-	if needsRefresh {
-		refreshedTorrent, err := m.refreshTorrent(torrent.InfoHash)
-		if err != nil {
-			m.logger.Error().Err(err).Str("infohash", torrent.InfoHash).Msg("Failed to refresh torrent")
-			return filenames // Return original filenames if refresh fails
-		}
-		torrent = refreshedTorrent
-		placement = torrent.GetActivePlacement()
-		if placement == nil {
-			m.logger.Error().Str("infohash", torrent.InfoHash).Msg("No active placement after refresh")
-			return filenames
-		}
 	}
 
 	// Get the debrid client for link checking
