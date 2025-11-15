@@ -31,12 +31,12 @@ func (m *Manager) Stats() map[string]interface{} {
 		stats.Core = *coreStats
 	}
 
-	// Get memory usage
+	// GetReader memory usage
 	memStats, err := m.client.GetMemoryUsage()
 	if err == nil {
 		stats.Memory = *memStats
 	}
-	// Get bandwidth stats
+	// GetReader bandwidth stats
 	bwStats, err := m.client.GetBandwidthStats()
 	if err == nil && bwStats != nil {
 		stats.Bandwidth = *bwStats
@@ -54,7 +54,7 @@ func (m *Manager) Stats() map[string]interface{} {
 	m.mu.RUnlock()
 	stats.Mounts = mountInfos
 
-	// Get version info
+	// GetReader version info
 	versionResp, err := m.client.GetVersion()
 	if err == nil {
 		stats.Version = *versionResp

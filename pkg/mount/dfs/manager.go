@@ -109,33 +109,19 @@ func (m *Manager) Stats() map[string]interface{} {
 		aggregated.CacheDirSize.Add(mountStats.CacheDirSize)
 		aggregated.CacheDirLimit.Add(mountStats.CacheDirLimit)
 		aggregated.ActiveReads.Add(mountStats.ActiveReads)
-		aggregated.OpenedFiles.Add(mountStats.OpenedFiles)
+		aggregated.OpenedFiles.Add(int64(mountStats.OpenedFiles))
 
-		// Aggregate memory buffer stats if present
-		if mountStats.MemoryBuffer != nil {
-			aggregated.MemHits.Add(mountStats.MemoryBuffer.Hits)
-			aggregated.MemMisses.Add(mountStats.MemoryBuffer.Misses)
-			aggregated.MemEvictions.Add(mountStats.MemoryBuffer.Evictions)
-			aggregated.MemFlushes.Add(mountStats.MemoryBuffer.Flushes)
-			aggregated.MemFlushBytes.Add(mountStats.MemoryBuffer.FlushBytes)
-			aggregated.MemoryUsed.Add(mountStats.MemoryBuffer.MemoryUsed)
-			aggregated.MemoryLimit.Add(mountStats.MemoryBuffer.MemoryLimit)
-			aggregated.MemChunksCount.Add(mountStats.MemoryBuffer.ChunksCount)
-			aggregated.MemFilesCount.Add(int64(mountStats.MemoryBuffer.FilesCount))
-		}
-
-		// Get config values from first mount (same across all mounts)
-		if !firstMountConfigSet && mount.vfs != nil {
-			vfsStats := mount.vfs.GetStats()
-			if cs, ok := vfsStats["chunk_size"].(int64); ok {
-				aggregated.ChunkSize = cs
+		// GetReader config values from first mount (same across all mounts)
+		if !firstMountConfigSet && mount.rfs != nil {
+			rfsStats := mount.rfs.GetStats()
+			// RFS doesn't expose chunk_size/read_ahead/buffer in stats
+			// Use config values instead
+			if mount.config != nil {
+				aggregated.ChunkSize = mount.config.ChunkSize
+				aggregated.ReadAheadSize = mount.config.ReadAheadSize
+				aggregated.BufferSize = mount.config.BufferSize
 			}
-			if ras, ok := vfsStats["read_ahead_size"].(int64); ok {
-				aggregated.ReadAheadSize = ras
-			}
-			if bs, ok := vfsStats["buffer_size"].(int64); ok {
-				aggregated.BufferSize = bs
-			}
+			_ = rfsStats // Avoid unused variable
 			firstMountConfigSet = true
 		}
 	}

@@ -359,25 +359,25 @@ func getAppPreferences() *AppPreferences {
 }
 
 type Torrent struct {
-	Hash         string         `json:"hash"`
-	Name         string         `json:"name"`
-	Size         int64          `json:"size"`
-	Progress     float64        `json:"progress"`
-	Dlspeed      int64          `json:"dlspeed"`
-	Eta          int64          `json:"eta"`
-	NumSeeds     int            `json:"num_seeds"`
-	State        string         `json:"state"`
-	Category     string         `json:"category"`
-	SavePath     string         `json:"save_path"`
-	ContentPath  string         `json:"content_path"`
-	AddedOn      int64          `json:"added_on"`
-	CompletionOn int64          `json:"completion_on"`
-	Debrid       string         `json:"debrid"`
-	DebridID     string         `json:"debrid_id"`
-	AmountLeft   int64          `json:"amount_left"`
-	Downloaded   int64          `json:"downloaded"`
-	MagnetURI    string         `json:"magnet_uri"`
-	Files        []*TorrentFile `json:"files"`
+	Hash         string               `json:"hash"`
+	Name         string               `json:"name"`
+	Size         int64                `json:"size"`
+	Progress     float64              `json:"progress"`
+	Dlspeed      int64                `json:"dlspeed"`
+	Eta          int64                `json:"eta"`
+	NumSeeds     int                  `json:"num_seeds"`
+	State        storage.TorrentState `json:"state"`
+	Category     string               `json:"category"`
+	SavePath     string               `json:"save_path"`
+	ContentPath  string               `json:"content_path"`
+	AddedOn      int64                `json:"added_on"`
+	CompletionOn int64                `json:"completion_on"`
+	Debrid       string               `json:"debrid"`
+	DebridID     string               `json:"debrid_id"`
+	AmountLeft   int64                `json:"amount_left"`
+	Downloaded   int64                `json:"downloaded"`
+	MagnetURI    string               `json:"magnet_uri"`
+	Files        []TorrentFile        `json:"files"`
 }
 
 type TorrentFile struct {
@@ -412,15 +412,22 @@ func convertToQBitTorrentTorrent(t *storage.Torrent) Torrent {
 		AmountLeft:   int64(float64(t.Size) * (1 - t.Progress)),
 		Downloaded:   int64(float64(t.Size) * t.Progress),
 		MagnetURI:    t.Magnet,
+		Files:        getTorrentFiles(t),
 	}
+
+	return qbitTorrent
+}
+
+func getTorrentFiles(t *storage.Torrent) []TorrentFile {
 	index := 0
+	files := make([]TorrentFile, 0)
 	for _, f := range t.Files {
-		qbitTorrent.Files = append(qbitTorrent.Files, &TorrentFile{
+		files = append(files, TorrentFile{
 			Name:  f.Name,
 			Size:  f.Size,
 			Index: index,
 		})
 		index++
 	}
-	return qbitTorrent
+	return files
 }

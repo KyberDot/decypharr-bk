@@ -11,34 +11,26 @@ import (
 // AddOrUpdate adds or updates a torrent with automatic bucket management
 func (s *Storage) AddOrUpdate(torrent *Torrent) error {
 	torrent.UpdatedAt = time.Now()
-	torrent.State = torrent.GetState()
-
 	return s.db.Update(func(tx *bolt.Tx) error {
 		cachedBkt := tx.Bucket([]byte(cachedBucket))
-		nameIdxBkt := tx.Bucket([]byte(nameIndexBucket))
+		// Do name index handling
+		if err := s.handleNameAdd(tx, torrent); err != nil {
+			return err
+		}
 
-		nameKey := []byte(torrent.GetFolder())
-		existingInfoHash := nameIdxBkt.Get(nameKey)
-
-		// CHECK FOR NAME COLLISION
-		if existingInfoHash != nil && string(existingInfoHash) != torrent.InfoHash {
-			existing, err := s.Get(string(existingInfoHash))
-			if err == nil {
-				// MERGE THE TORRENTS
-				merged := mergeTorrentsFiles(existing, torrent)
-
-				// Save merged version under existing infohash
-				data, _ := msgpack.Marshal(merged)
-				if err := cachedBkt.Put([]byte(existing.InfoHash), data); err != nil {
-					return err
+		// Always prefer newer torrent data
+		// over existing data, so check timestamps
+		existingData := cachedBkt.Get([]byte(torrent.InfoHash))
+		if existingData != nil {
+			var existing Torrent
+			if err := msgpack.Unmarshal(existingData, &existing); err == nil {
+				if existing.AddedOn.After(torrent.AddedOn) {
+					// Existing is newer, skip update
+					return nil
 				}
-
-				// Name index still points to existing infohash
-				return nil
 			}
 		}
 
-		// No merge - regular save
 		data, err := msgpack.Marshal(torrent)
 		if err != nil {
 			return fmt.Errorf("failed to marshal torrent: %w", err)
@@ -46,10 +38,6 @@ func (s *Storage) AddOrUpdate(torrent *Torrent) error {
 
 		if err := cachedBkt.Put([]byte(torrent.InfoHash), data); err != nil {
 			return fmt.Errorf("failed to set torrent: %w", err)
-		}
-
-		if err := nameIdxBkt.Put(nameKey, []byte(torrent.InfoHash)); err != nil {
-			return fmt.Errorf("failed to set name index: %w", err)
 		}
 
 		return nil
@@ -61,36 +49,22 @@ func (s *Storage) BatchAddOrUpdate(torrents []*Torrent) error {
 	if len(torrents) == 0 {
 		return nil
 	}
-
 	return s.db.Update(func(tx *bolt.Tx) error {
 		cachedBkt := tx.Bucket([]byte(cachedBucket))
-		nameIdxBkt := tx.Bucket([]byte(nameIndexBucket))
-
 		for _, torrent := range torrents {
 			torrent.UpdatedAt = time.Now()
-			torrent.State = torrent.GetState()
 
-			nameKey := []byte(torrent.GetFolder())
-			existingInfoHash := nameIdxBkt.Get(nameKey)
+			if err := s.handleNameAdd(tx, torrent); err != nil {
+				return err
+			}
 
-			// CHECK FOR NAME COLLISION
-			if existingInfoHash != nil && string(existingInfoHash) != torrent.InfoHash {
-				// Get existing from the bucket in this transaction
-				existingData := cachedBkt.Get(existingInfoHash)
-				if existingData != nil {
-					var existing Torrent
-					if err := msgpack.Unmarshal(existingData, &existing); err == nil {
-
-						// MERGE THE TORRENTS
-						merged := mergeTorrentsFiles(&existing, torrent)
-
-						// Save merged version under existing infohash
-						data, _ := msgpack.Marshal(merged)
-						if err := cachedBkt.Put([]byte(existing.InfoHash), data); err != nil {
-							return err
-						}
-
-						// Name index still points to existing infohash
+			// Check existing torrent for timestamp
+			existingData := cachedBkt.Get([]byte(torrent.InfoHash))
+			if existingData != nil {
+				var existing Torrent
+				if err := msgpack.Unmarshal(existingData, &existing); err == nil {
+					if existing.AddedOn.After(torrent.AddedOn) {
+						// Existing is newer, skip update
 						continue
 					}
 				}
@@ -104,10 +78,6 @@ func (s *Storage) BatchAddOrUpdate(torrents []*Torrent) error {
 
 			if err := cachedBkt.Put([]byte(torrent.InfoHash), data); err != nil {
 				return fmt.Errorf("failed to set torrent: %w", err)
-			}
-
-			if err := nameIdxBkt.Put(nameKey, []byte(torrent.InfoHash)); err != nil {
-				return fmt.Errorf("failed to set name index: %w", err)
 			}
 		}
 
@@ -123,7 +93,7 @@ func (s *Storage) getInfoHash(name string) (string, error) {
 	var infohash string
 
 	err := s.db.View(func(tx *bolt.Tx) error {
-		bucket := tx.Bucket([]byte(nameIndexBucket))
+		bucket := tx.Bucket([]byte(nameEntryBucket))
 		if bucket == nil {
 			return fmt.Errorf("name index bucket not found")
 		}
@@ -132,7 +102,10 @@ func (s *Storage) getInfoHash(name string) (string, error) {
 		if data == nil {
 			return fmt.Errorf("torrent not found by name: %s", name)
 		}
-		infohash = string(data)
+		var entry TorrentEntry
+		if err := msgpack.Unmarshal(data, &entry); err != nil {
+			return fmt.Errorf("failed to unmarshal name entry: %w", err)
+		}
 		return nil
 	})
 
@@ -177,16 +150,7 @@ func (s *Storage) Get(infohash string) (*Torrent, error) {
 	return &torr, err
 }
 
-func (s *Storage) GetByHashAndCategory(infohash, category string) (*Torrent, error) {
-	// For bbolt, category is not used in cached bucket
-	return s.Get(infohash)
-}
-
-func (s *Storage) GetByName(name string) (*Torrent, error) {
-	infohash, err := s.getInfoHash(name)
-	if err != nil {
-		return nil, err
-	}
+func (s *Storage) GetByHashAndCategory(infohash string) (*Torrent, error) {
 	return s.Get(infohash)
 }
 
@@ -286,14 +250,6 @@ func (s *Storage) Delete(infohash string) error {
 
 		return bucket.Delete([]byte(infohash))
 	})
-}
-
-func (s *Storage) DeleteByName(name string) error {
-	infohash, err := s.getInfoHash(name)
-	if err != nil {
-		return err
-	}
-	return s.Delete(infohash)
 }
 
 // DeleteBatch deletes multiple torrents

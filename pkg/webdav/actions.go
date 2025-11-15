@@ -98,7 +98,7 @@ func (h *Handler) handleDownload(info *manager.FileInfo, w http.ResponseWriter, 
 				return
 			}
 			if streamErr.StatusCode > 0 {
-				h.logger.Trace().Err(err).Msgf("Error streaming %s", info.Name())
+				h.logger.Trace().Err(err).Msgf("Error streaming %s/%s", info.Parent(), info.Name())
 				http.Error(w, streamErr.Error(), streamErr.StatusCode)
 				return
 			} else {

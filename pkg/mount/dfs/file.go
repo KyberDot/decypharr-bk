@@ -12,30 +12,31 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/pkg/manager"
-	"github.com/sirrobot01/decypharr/pkg/mount/dfs/config"
-	"github.com/sirrobot01/decypharr/pkg/mount/dfs/vfs"
+	"github.com/sirrobot01/decypharr/pkg/mount/dfs/common"
+	"github.com/sirrobot01/decypharr/pkg/mount/dfs/rfs"
 )
 
-// File implements a FUSE file with sparse file caching
+// File implements a FUSE file with RFS streaming
 type File struct {
 	fs.Inode
-	config    *config.FuseConfig
+	config    *common.FuseConfig
 	logger    zerolog.Logger
 	info      *manager.FileInfo
 	createdAt time.Time
 	content   []byte // For files like version.txt
-	vfs       *vfs.Manager
+	rfs       *rfs.Manager
 }
 
-// FileHandle implements file operations with VFS
+// FileHandle implements file operations with RFS
+// Key optimization: RFS Reader is persistent across reads, not recreated per read!
 type FileHandle struct {
-	file         *File
-	vfsFile      *vfs.File // Direct file handle (no more Handle wrapper)
-	vfsOnce      sync.Once // Ensures VFS file created exactly once
-	vfsCreateErr error     // Stores any error from VFS file creation
-	closed       atomic.Bool
-	lastAccess   atomic.Int64
-	logger       zerolog.Logger
+	file       *File
+	rfsReader  *rfs.Reader // Persistent reader with connection pooling
+	readerOnce sync.Once   // Ensures reader created exactly once
+	readerErr  error       // Stores any error from reader creation
+	closed     atomic.Bool
+	lastAccess atomic.Int64
+	logger     zerolog.Logger
 }
 
 var _ = (fs.NodeOpener)((*File)(nil))
@@ -46,12 +47,12 @@ var _ = (fs.FileFlusher)((*FileHandle)(nil))
 var _ = (fs.FileFsyncer)((*FileHandle)(nil))
 
 // newFile creates a new file
-func newFile(vfsCache *vfs.Manager, config *config.FuseConfig, info *manager.FileInfo, logger zerolog.Logger) *File {
+func newFile(rfsManager *rfs.Manager, config *common.FuseConfig, info *manager.FileInfo, logger zerolog.Logger) *File {
 	return &File{
 		config: config,
 		logger: logger,
 		info:   info,
-		vfs:    vfsCache,
+		rfs:    rfsManager,
 	}
 }
 
@@ -89,7 +90,7 @@ func (f *File) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, s
 	return fh, 0, 0
 }
 
-// Read implements VFS reading
+// Read implements RFS streaming with persistent reader
 func (fh *FileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	fh.lastAccess.Store(time.Now().Unix())
 
@@ -107,31 +108,36 @@ func (fh *FileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.Re
 		return fuse.ReadResultData(data), 0
 	}
 
-	// Lazy-create VFS file on first read (not on Open)
-	// This prevents unnecessary sparse file creation when file browsers
-	// just open files for metadata without actually reading content
-	// Uses sync.Once to ensure thread-safe creation
+	// Lazy-create RFS reader on first read
+	// CRITICAL: Reader is created ONCE and persists across all reads!
+	// This enables:
+	// - HTTP connection reuse
+	// - Sequential read detection
+	// - Intelligent prefetching
+	// - Progressive chunk delivery
 	if fh.file.info.IsRemote() {
-		fh.vfsOnce.Do(func() {
+		fh.readerOnce.Do(func() {
 			var err error
-			fh.vfsFile, err = fh.file.vfs.CreateReader(fh.file.info)
-			fh.vfsCreateErr = err
+			fh.rfsReader, err = fh.file.rfs.GetReader(fh.file.info)
+			fh.readerErr = err
 		})
 
 		// Check if creation failed
-		if fh.vfsCreateErr != nil {
+		if fh.readerErr != nil {
+			fh.logger.Error().Err(fh.readerErr).Msg("Failed to create RFS reader")
 			return nil, syscall.EIO
 		}
 	}
 
-	// Ensure we have a VFS file
-	if fh.vfsFile == nil {
+	// Ensure we have an RFS reader
+	if fh.rfsReader == nil {
 		return nil, syscall.EIO
 	}
 
-	// Use ReadAt for direct reading with download support
-	n, err := fh.vfsFile.ReadAt(ctx, dest, off)
+	// Read from RFS (with automatic prefetching, connection reuse, etc.)
+	n, err := fh.rfsReader.ReadAt(dest, off)
 	if err != nil && err != io.EOF {
+		fh.logger.Error().Err(err).Int64("offset", off).Int("size", len(dest)).Msg("RFS read failed")
 		return nil, syscall.EIO
 	}
 	return fuse.ReadResultData(dest[:n]), 0
@@ -156,20 +162,11 @@ func (fh *FileHandle) Release(ctx context.Context) syscall.Errno {
 		return 0
 	}
 
-	// Close VFS file
-	// Note: We DON'T decrement the counter here because:
-	// 1. Counter is incremented when File is created (CreateReader)
-	// 2. Counter is decremented when File is evicted from cache or explicitly closed
-	// 3. Multiple FileHandles can reference the same File (via cache)
-	// 4. Decrementing here would cause double-decrement when cache evicts the file
-	//
-	// We also DON'T call vfsFile.Close() because that would stop all downloads
-	// and close the file descriptor. The file is shared and managed by the cache.
-	// Just sync any pending writes.
-	if fh.vfsFile != nil {
-		if err := fh.vfsFile.Sync(); err != nil {
-			fh.logger.Error().Err(err).Msg("failed to sync VFS file")
-		}
+	// Release RFS reader reference
+	// The reader is pooled and managed by RFS Manager
+	// It will be automatically cleaned up when idle
+	if fh.rfsReader != nil {
+		fh.file.rfs.ReleaseReader(fh.file.info)
 	}
 
 	return 0

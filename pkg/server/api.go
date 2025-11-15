@@ -173,7 +173,7 @@ func (s *Server) handleGetTorrents(w http.ResponseWriter, r *http.Request) {
 		sortOrder = "desc"
 	}
 
-	// Get all torrents
+	// GetReader all torrents
 	allTorrents := s.manager.Queue().ListFilter("", "", nil, "added_on", false)
 
 	// Apply filters
@@ -193,7 +193,7 @@ func (s *Server) handleGetTorrents(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// State filter
-		if state != "" && t.State != state {
+		if state != "" && t.State != storage.TorrentState(state) {
 			continue
 		}
 
@@ -220,7 +220,7 @@ func (s *Server) handleGetTorrents(w http.ResponseWriter, r *http.Request) {
 		paginatedTorrents = []*storage.Torrent{}
 	}
 
-	// Get unique categories
+	// GetReader unique categories
 	categorySet := make(map[string]bool)
 	for _, t := range allTorrents {
 		if t.Category != "" {
@@ -289,7 +289,6 @@ func sortQueuedTorrents(torrents []*storage.Torrent, sortBy, sortOrder string) {
 
 func (s *Server) handleDeleteTorrent(w http.ResponseWriter, r *http.Request) {
 	hash := chi.URLParam(r, "hash")
-	category := chi.URLParam(r, "category")
 	removeFromDebrid := r.URL.Query().Get("removeFromDebrid") == "true"
 	if hash == "" {
 		http.Error(w, "No hash provided", http.StatusBadRequest)
@@ -303,7 +302,7 @@ func (s *Server) handleDeleteTorrent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := s.manager.Queue().Delete(hash, category, cleanup); err != nil {
+	if err := s.manager.Queue().Delete(hash, cleanup); err != nil {
 		s.logger.Error().Err(err).Str("hash", hash).Msg("Failed to delete torrent")
 		http.Error(w, "Failed to delete torrent", http.StatusInternalServerError)
 		return
@@ -371,7 +370,7 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get the current configuration
+	// GetReader the current configuration
 	currentConfig := config.Get()
 	setupCompleted := currentConfig.SetupCompleted
 

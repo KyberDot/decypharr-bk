@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/sirrobot01/decypharr/pkg/mount/dfs/vfs/ranges"
+	"github.com/sirrobot01/decypharr/pkg/mount/dfs/common"
 )
 
 // Metadata stores information about a cached file
@@ -16,7 +16,7 @@ type Metadata struct {
 	ModTime     time.Time      `json:"mod_time"`    // Modification time of remote file
 	ATime       time.Time      `json:"atime"`       // Last access time (for LRU)
 	Size        int64          `json:"size"`        // Total file size
-	Ranges      []ranges.Range `json:"ranges"`      // Which parts are cached
+	Ranges      []common.Range `json:"ranges"`      // Which parts are cached
 	Fingerprint string         `json:"fingerprint"` // Hash/ETag for cache validation
 	Dirty       bool           `json:"dirty"`       // Has unflushed writes
 }

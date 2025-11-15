@@ -29,8 +29,7 @@ func (m *Manager) refreshTorrents(ctx context.Context, debridName string, debrid
 
 	// Use singleflight to prevent concurrent refreshes for the same debrid
 	_, err, _ := m.refreshSG.Do(debridName, func() (interface{}, error) {
-		m.logger.Debug().Str("debrid", debridName).Msg("Starting torrent refresh")
-
+		entries := m.storage.GetEntries()
 		// Fetch torrents from this debrid client
 		torrents, err := debridClient.GetTorrents()
 		if err != nil {
@@ -57,6 +56,7 @@ func (m *Manager) refreshTorrents(ctx context.Context, debridName string, debrid
 		newTorrents := make([]*types.Torrent, 0, 100)
 		torrentsToUpdate := make([]*storage.Torrent, 0, 100)
 		torrentsToDelete := make([]string, 0, 10)
+		toRefreshEntries := make([]*storage.Torrent, 0, 100)
 
 		// Build a lightweight set of cached infohashes during streaming (memory efficient)
 		cachedInfoHashes := make(map[string]bool, len(currentByInfoHash))
@@ -68,7 +68,7 @@ func (m *Manager) refreshTorrents(ctx context.Context, debridName string, debrid
 				cachedInfoHashes[cached.InfoHash] = true
 
 				currentTorrent, existsOnDebrid := currentByInfoHash[cached.InfoHash]
-				hasPlacementOnDebrid := cached.HasPlacement(debridName, cached.InfoHash)
+				hasPlacementOnDebrid := cached.HasPlacement(debridName)
 
 				if hasPlacementOnDebrid {
 					// Cached torrent has a placement on this debrid
@@ -87,6 +87,10 @@ func (m *Manager) refreshTorrents(ctx context.Context, debridName string, debrid
 					// Cached torrent doesn't have placement on this debrid, but torrent exists on debrid
 					// This is a new placement to add
 					newTorrents = append(newTorrents, currentTorrent)
+				}
+				// Check torrents not in entries
+				if _, exists := entries[cached.GetFolder()]; !exists {
+					toRefreshEntries = append(toRefreshEntries, cached)
 				}
 			}
 			return nil
@@ -117,7 +121,6 @@ func (m *Manager) refreshTorrents(ctx context.Context, debridName string, debrid
 
 		// Handle deletions concurrently
 		if len(torrentsToDelete) > 0 {
-			m.logger.Debug().Str("debrid", debridName).Msgf("Deleting %d torrents with no remaining placements", len(torrentsToDelete))
 
 			var deleteWg sync.WaitGroup
 			deleteChan := make(chan string, len(torrentsToDelete))
@@ -149,7 +152,6 @@ func (m *Manager) refreshTorrents(ctx context.Context, debridName string, debrid
 		// Batch update torrents with changed placements - do this concurrently
 		var updateWg sync.WaitGroup
 		if len(torrentsToUpdate) > 0 {
-			m.logger.Debug().Str("debrid", debridName).Msgf("Updating %d torrents", len(torrentsToUpdate))
 			updateWg.Add(1)
 			go func(torrents []*storage.Torrent) {
 				defer updateWg.Done()
@@ -161,8 +163,6 @@ func (m *Manager) refreshTorrents(ctx context.Context, debridName string, debrid
 
 		// Process new torrents/placements with batching
 		if len(newTorrents) > 0 {
-			m.logger.Trace().Str("debrid", debridName).Msgf("Found %d new torrents/placements", len(newTorrents))
-
 			workChan := make(chan *types.Torrent, min(100, len(newTorrents)))
 			batchChan := make(chan *storage.Torrent, 50)
 			var processWg sync.WaitGroup
@@ -209,7 +209,6 @@ func (m *Manager) refreshTorrents(ctx context.Context, debridName string, debrid
 
 			// Workers - scale based on torrent count for better throughput
 			workers := min(100, max(10, len(newTorrents)/10))
-			m.logger.Debug().Str("debrid", debridName).Msgf("Starting %d workers for processing %d torrents", workers, len(newTorrents))
 
 			for i := 0; i < workers; i++ {
 				processWg.Add(1)
@@ -238,12 +237,25 @@ func (m *Manager) refreshTorrents(ctx context.Context, debridName string, debrid
 			processWg.Wait()
 			close(batchChan)
 			batchWg.Wait()
-
-			m.logger.Debug().Str("debrid", debridName).Msgf("Processed %d new torrents/placements", processed)
 		}
 
 		// Wait for concurrent update to finish
 		updateWg.Wait()
+
+		// Refresh entries for torrents missing them
+		if len(toRefreshEntries) > 0 {
+			var entryWg sync.WaitGroup
+			entryWg.Add(1)
+			go func(torrents []*storage.Torrent) {
+				defer entryWg.Done()
+				for _, t := range torrents {
+					if err := m.storage.UpdateTorrentEntry(t); err != nil {
+						m.logger.Error().Err(err).Str("infohash", t.InfoHash).Msg("Failed to refresh torrent entry")
+					}
+				}
+			}(toRefreshEntries)
+			entryWg.Wait()
+		}
 
 		// Force garbage collection to reclaim memory
 		runtime.GC()
@@ -254,14 +266,38 @@ func (m *Manager) refreshTorrents(ctx context.Context, debridName string, debrid
 	if err != nil {
 		m.logger.Error().Err(err).Str("debrid", debridName).Msg("Failed to refresh torrents")
 	}
+}
 
-	// Refresh entries
-	m.RefreshEntries(true)
+func (m *Manager) refreshEntries(ctx context.Context) {
+	// Refresh all torrents to update their entries
+	var wg sync.WaitGroup
+	err := m.storage.ForEachBatch(100, func(batch []*storage.Torrent) error {
+		wg.Add(1)
+		go func(torrents []*storage.Torrent) {
+			defer wg.Done()
+			for _, t := range torrents {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					// Just refresh torrent entries
+					if err := m.storage.UpdateTorrentEntry(t); err != nil {
+						m.logger.Error().Err(err).Str("infohash", t.InfoHash).Msg("Failed to refresh torrent entry")
+					}
+				}
+			}
+		}(batch)
+		return nil
+	})
+	wg.Wait()
+	if err != nil {
+		m.logger.Error().Err(err).Msg("Failed to refresh entries")
+	}
 }
 
 // processSyncTorrent processes a single torrent and returns it for batched writing
 func (m *Manager) processSyncTorrent(t *types.Torrent) (*storage.Torrent, error) {
-	// Get the debrid client
+	// GetReader the debrid client
 	client := m.DebridClient(t.Debrid)
 	if client == nil {
 		return nil, nil
@@ -278,10 +314,6 @@ func (m *Manager) processSyncTorrent(t *types.Torrent) (*storage.Torrent, error)
 
 		// Re-check completion after update
 		if !isComplete(t.Files) {
-			m.logger.Debug().
-				Str("torrent_id", t.Id).
-				Str("torrent_name", t.Name).
-				Msg("Torrent still not complete after refresh")
 			return nil, nil
 		}
 	}
@@ -294,7 +326,7 @@ func (m *Manager) processSyncTorrent(t *types.Torrent) (*storage.Torrent, error)
 
 	// Check if we have an existing managed torrent
 	// Note: This is a database read per torrent - could be optimized with batch reads
-	// or an in-memory cache, but storage.Get is likely fast (indexed by InfoHash)
+	// or an in-memory cache, but storage.GetReader is likely fast (indexed by InfoHash)
 	mt, err := m.storage.Get(t.InfoHash)
 	if err != nil {
 		// Create new managed torrent
@@ -328,7 +360,6 @@ func (m *Manager) processSyncTorrent(t *types.Torrent) (*storage.Torrent, error)
 			CreatedAt:        addedOn,
 			UpdatedAt:        time.Now(),
 		}
-		mt.Folder = mt.GetFolder()
 	}
 
 	// Populate global Files metadata (only if empty)
@@ -341,7 +372,7 @@ func (m *Manager) processSyncTorrent(t *types.Torrent) (*storage.Torrent, error)
 				ByteRange: f.ByteRange,
 				Deleted:   f.Deleted,
 				InfoHash:  t.InfoHash,
-				Debrid:    t.Debrid,
+				AddedOn:   addedOn,
 			}
 		}
 	}
@@ -352,15 +383,6 @@ func (m *Manager) processSyncTorrent(t *types.Torrent) (*storage.Torrent, error)
 	if t.Status == types.TorrentStatusDownloaded {
 		downloadedAt := addedOn
 		placement.DownloadedAt = &downloadedAt
-	}
-
-	// Populate placement-specific file data
-	for _, f := range t.GetFiles() {
-		placement.Files[f.Name] = &storage.PlacementFile{
-			Id:   f.Id,
-			Link: f.Link,
-			Path: f.Path,
-		}
 	}
 
 	// If this is the first placement or the only one, make it active
@@ -389,12 +411,12 @@ func (m *Manager) refreshTorrent(infohash string) (*storage.Torrent, error) {
 		return torrent, nil
 	}
 
-	placement := torrent.GetActivePlacement(infohash)
+	placement := torrent.GetActivePlacement()
 	if placement == nil {
 		return torrent, nil
 	}
 
-	// Get updated torrent info from debrid
+	// GetReader updated torrent info from debrid
 	debridTorrent, err := client.GetTorrent(placement.ID)
 	if err != nil {
 		return nil, err
@@ -403,6 +425,11 @@ func (m *Manager) refreshTorrent(infohash string) (*storage.Torrent, error) {
 	// Update placement info
 	placement.Status = debridTorrent.Status
 	placement.Progress = debridTorrent.Progress
+
+	addedOn, err := time.Parse(time.RFC3339, debridTorrent.Added)
+	if err != nil {
+		addedOn = time.Now()
+	}
 
 	// Update global Files metadata (only if needed)
 	for _, f := range debridTorrent.GetFiles() {
@@ -414,7 +441,7 @@ func (m *Manager) refreshTorrent(infohash string) (*storage.Torrent, error) {
 				ByteRange: f.ByteRange,
 				Deleted:   f.Deleted,
 				InfoHash:  debridTorrent.InfoHash,
-				Debrid:    debridTorrent.Debrid,
+				AddedOn:   addedOn,
 			}
 		}
 	}

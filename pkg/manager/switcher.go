@@ -17,7 +17,7 @@ func ptrTime(t time.Time) *time.Time {
 
 // SwitchTorrent moves a torrent from one debrid to another
 func (m *Manager) SwitchTorrent(ctx context.Context, infohash, targetDebrid string, keepOld, waitComplete bool) (*storage.SwitcherJob, error) {
-	// Get the torrent
+	// GetReader the torrent
 	torrent, err := m.GetTorrent(infohash)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get torrent: %w", err)
@@ -34,7 +34,7 @@ func (m *Manager) SwitchTorrent(ctx context.Context, infohash, targetDebrid stri
 		InfoHash:     infohash,
 		SourceDebrid: torrent.ActiveDebrid,
 		TargetDebrid: targetDebrid,
-		Status:       "pending",
+		Status:       storage.SwitcherStatusPending,
 		Progress:     0,
 		CreatedAt:    time.Now(),
 		KeepOld:      keepOld,
@@ -58,23 +58,24 @@ func (m *Manager) executeMigration(ctx context.Context, job *storage.SwitcherJob
 		Str("source", job.SourceDebrid).
 		Str("target", job.TargetDebrid).
 		Msg("Starting torrent migration")
+	job.Status = storage.SwitcherStatusInProgress
 
-	// Get target debrid client
+	// GetReader target debrid client
 	targetClient := m.DebridClient(job.TargetDebrid)
 	if targetClient == nil {
-		job.Status = "failed"
+		job.Status = storage.SwitcherStatusFailed
 		job.Error = fmt.Sprintf("target debrid %s not found", job.TargetDebrid)
 		job.CompletedAt = ptrTime(time.Now())
 		return
 	}
 	// Submit to target debrid
-	job.Status = "submitting"
+
 	job.Progress = 10
 
 	success, err := m.fixer.MoveTorrent(torrent, job.TargetDebrid, false) // false = don't force re-download
 
 	if err != nil || !success {
-		job.Status = "failed"
+		job.Status = storage.SwitcherStatusFailed
 		job.Error = fmt.Sprintf("failed to move torrent to target debrid: %v", err)
 		job.CompletedAt = ptrTime(time.Now())
 		m.logger.Error().
@@ -108,11 +109,11 @@ func (m *Manager) executeMigration(ctx context.Context, job *storage.SwitcherJob
 	if err := m.AddOrUpdate(torrent, func(t *storage.Torrent) {
 		m.RefreshEntries(false)
 	}); err != nil {
-		job.Status = "failed"
+		job.Status = storage.SwitcherStatusFailed
 		job.Error = fmt.Sprintf("failed to update torrent: %v", err)
 		m.logger.Error().Err(err).Msg("Failed to update torrent after migration")
 	} else {
-		job.Status = "completed"
+		job.Status = storage.SwitcherStatusCompleted
 		job.Progress = 100
 	}
 

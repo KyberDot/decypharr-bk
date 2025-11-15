@@ -13,7 +13,6 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/utils"
-	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
@@ -48,7 +47,7 @@ func NewDownloadManager(manager *Manager) *Downloader {
 	}
 }
 
-func (d *Downloader) download(torrent *storage.Torrent, links map[string]debridTypes.DownloadLink) error {
+func (d *Downloader) download(torrent *storage.Torrent) error {
 	var (
 		isMultiSeason bool
 		seasons       []SeasonInfo
@@ -72,36 +71,40 @@ func (d *Downloader) download(torrent *storage.Torrent, links map[string]debridT
 				continue
 			}
 			// Then process the symlinks for each season torrent
-			if err := d.process(result, torrentMountPath, links); err != nil {
+			if err := d.process(result, torrentMountPath); err != nil {
 				d.markAsError(result, err)
 			}
 		}
 	}
-	return d.process(torrent, torrentMountPath, links)
+	return d.process(torrent, torrentMountPath)
 }
 
-func (d *Downloader) process(torrent *storage.Torrent, mountPath string, links map[string]debridTypes.DownloadLink) error {
+func (d *Downloader) process(torrent *storage.Torrent, mountPath string) error {
+	timer := time.Now()
+	defer func() {
+		// Log how long it took to process
+		d.logger.Info().Str("action", string(torrent.Action)).Str("debrid", torrent.ActiveDebrid).Msgf("Processed torrent %s in %s", torrent.Name, time.Since(timer))
+	}()
 	switch torrent.Action {
 	case config.DownloadActionDownload:
-		return d.processDownload(torrent, links)
+		return d.processDownload(torrent)
 	case config.DownloadActionSymlink:
 		return d.processSymlink(torrent, mountPath)
 	case config.DownloadActionStrm:
 		return d.processStrm(torrent)
 	default:
-		return fmt.Errorf("unknown action: %s", torrent.Action)
+		return d.processSymlink(torrent, mountPath)
 	}
 }
 
 func (d *Downloader) markAsCompleted(torrent *storage.Torrent) {
 	// Mark as completed
-	downloadedPath := filepath.Join(torrent.SavePath, utils.RemoveExtension(torrent.Name))
-	torrent.MarkAsCompleted(downloadedPath)
+	torrent.MarkAsCompleted(torrent.SymlinkPath())
 	_ = d.manager.queue.Update(torrent)
 
 	// Send success notification
 	go func() {
-		msg := fmt.Sprintf("Download completed: %s [%s] -> %s", torrent.Name, torrent.Category, downloadedPath)
+		msg := fmt.Sprintf("Download completed: %s [%s] -> %s", torrent.Name, torrent.Category, torrent.SymlinkPath())
 		_ = d.manager.SendDiscordMessage("download_complete", "success", msg)
 	}()
 
@@ -136,11 +139,9 @@ func (d *Downloader) markAsError(torrent *storage.Torrent, err error) {
 
 // processSymlink creates symlinks for torrent files
 func (d *Downloader) processSymlink(torrent *storage.Torrent, mountPath string) error {
-
 	files := torrent.GetActiveFiles()
-	d.logger.Info().Msgf("Creating symlinks for %d files ...", len(files))
-
-	torrentSymlinkPath := filepath.Join(torrent.SavePath, utils.RemoveExtension(torrent.Name))
+	torrentSymlinkPath := torrent.SymlinkPath()
+	d.logger.Info().Str("mount_path", mountPath).Msgf("Creating symlinks for %d files in %s", len(files), torrentSymlinkPath)
 
 	// Create symlink directory
 	err := os.MkdirAll(torrentSymlinkPath, os.ModePerm)
@@ -192,10 +193,10 @@ func (d *Downloader) processSymlink(torrent *storage.Torrent, mountPath string) 
 			checkDirectory(mountPath)
 
 		case <-timeout:
-			d.logger.Warn().Msgf("Timeout waiting for files, %d files still pending", len(remainingFiles))
 			return fmt.Errorf("timeout waiting for files: %d files still pending", len(remainingFiles))
 		}
 	}
+	d.markAsCompleted(torrent)
 
 	// Pre-cache files if enabled
 	if !d.manager.config.SkipPreCache && len(filePaths) > 0 {
@@ -213,7 +214,7 @@ func (d *Downloader) processSymlink(torrent *storage.Torrent, mountPath string) 
 }
 
 // processDownload downloads all files for a torrent with progress tracking
-func (d *Downloader) processDownload(torrent *storage.Torrent, downloadLinks map[string]debridTypes.DownloadLink) error {
+func (d *Downloader) processDownload(torrent *storage.Torrent) error {
 	var wg sync.WaitGroup
 	files := torrent.GetActiveFiles()
 	d.logger.Info().Msgf("Downloading %d files...", len(files))
@@ -222,7 +223,7 @@ func (d *Downloader) processDownload(torrent *storage.Torrent, downloadLinks map
 	for _, file := range files {
 		totalSize += file.Size
 	}
-	downloadedFolder := filepath.Join(torrent.SavePath, utils.RemoveExtension(torrent.Name))
+	downloadedFolder := torrent.SymlinkPath()
 	err := os.MkdirAll(downloadedFolder, os.ModePerm)
 	if err != nil {
 		return fmt.Errorf("failed to create download directory: %s: %v", downloadedFolder, err)
@@ -253,9 +254,9 @@ func (d *Downloader) processDownload(torrent *storage.Torrent, downloadLinks map
 
 	errChan := make(chan error, len(files))
 	for _, file := range files {
-		downloadLink := downloadLinks[file.Name]
-		if downloadLink.Empty() {
-			d.logger.Error().Msgf("No download link for file %s", file.Name)
+		downloadLink, err := d.manager.GetDownloadLink(torrent, file.Name)
+		if err != nil {
+			d.logger.Error().Msgf("Failed to get download link for %s: %v", file.Name, err)
 			continue
 		}
 		client := &grab.Client{
@@ -312,7 +313,7 @@ func (d *Downloader) processStrm(torrent *storage.Torrent) error {
 	files := torrent.GetActiveFiles()
 	d.logger.Info().Msgf("Creating .strm for %d files ...", len(files))
 
-	torrentSymlinkPath := filepath.Join(torrent.SavePath, utils.RemoveExtension(torrent.Name))
+	torrentSymlinkPath := torrent.SymlinkPath()
 
 	// Create symlink directory
 	err := os.MkdirAll(torrentSymlinkPath, os.ModePerm)
@@ -337,6 +338,7 @@ func (d *Downloader) processStrm(torrent *storage.Torrent) error {
 			return fmt.Errorf("failed to create .strm file: %s: %v", strmFilePath, err)
 		}
 	}
+	d.markAsCompleted(torrent)
 	d.logger.Info().Msgf("Created .strm files for %s", torrent.Name)
 	return nil
 }

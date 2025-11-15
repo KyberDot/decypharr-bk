@@ -34,7 +34,7 @@ func main() {
 	flag.Parse()
 	config.SetConfigPath(configPath)
 	cfg := config.Get()
-	// Get port from environment variable or use default
+	// GetReader port from environment variable or use default
 	port := getEnvOrDefault("QBIT_PORT", cfg.Port)
 	webdavPath := ""
 	for _, debrid := range cfg.Debrids {

@@ -70,7 +70,7 @@ func NewHttpFile(url string) (*HttpFile, error) {
 		RetryDelay: time.Second,
 	}
 
-	// Get file size
+	// GetReader file size
 	size, err := file.getFileSize()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get file size: %w", err)
@@ -463,7 +463,7 @@ func (r *Reader) readFiles() error {
 	}
 
 	if headType == BlockFile {
-		// Get complete header data
+		// GetReader complete header data
 		completeHeader, err := r.readBytes(pos, headSize)
 		if err != nil || len(completeHeader) < headSize {
 			// Retry logic for incomplete headers

@@ -2,6 +2,7 @@ package storage
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/vmihailenco/msgpack/v5"
@@ -11,7 +12,6 @@ import (
 func (s *Storage) AddQueue(torrent *Torrent) error {
 	torrent.CreatedAt = time.Now()
 	torrent.UpdatedAt = time.Now()
-	torrent.State = torrent.GetState()
 
 	return s.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket([]byte(queuedBucket))
@@ -24,14 +24,13 @@ func (s *Storage) AddQueue(torrent *Torrent) error {
 			return fmt.Errorf("failed to marshal queued torrent: %w", err)
 		}
 
-		key := []byte(torrent.InfoHash + ":" + torrent.Category)
+		key := []byte(strings.ToLower(torrent.InfoHash))
 		return bucket.Put(key, data)
 	})
 }
 
 func (s *Storage) UpdateQueue(torrent *Torrent) error {
 	torrent.UpdatedAt = time.Now()
-	torrent.State = torrent.GetState()
 
 	return s.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket([]byte(queuedBucket))
@@ -44,12 +43,12 @@ func (s *Storage) UpdateQueue(torrent *Torrent) error {
 			return fmt.Errorf("failed to marshal queued torrent: %w", err)
 		}
 
-		key := []byte(torrent.InfoHash + ":" + torrent.Category)
+		key := []byte(strings.ToLower(torrent.InfoHash))
 		return bucket.Put(key, data)
 	})
 }
 
-func (s *Storage) GetQueued(infohash, category string) (*Torrent, error) {
+func (s *Storage) GetQueued(infohash string) (*Torrent, error) {
 	var torr Torrent
 
 	err := s.db.View(func(tx *bolt.Tx) error {
@@ -58,7 +57,7 @@ func (s *Storage) GetQueued(infohash, category string) (*Torrent, error) {
 			return fmt.Errorf("queued bucket not found")
 		}
 
-		key := []byte(infohash + ":" + category)
+		key := []byte(strings.ToLower(infohash))
 		data := bucket.Get(key)
 		if data == nil {
 			return fmt.Errorf("torrent not found: %s", infohash)
@@ -70,15 +69,15 @@ func (s *Storage) GetQueued(infohash, category string) (*Torrent, error) {
 	return &torr, err
 }
 
-func (s *Storage) DeleteQueued(infohash, category string, cleanup func(t *Torrent) error) error {
-	// First retrieve the torrent for cleanup
-	torr, err := s.GetQueued(infohash, category)
-	if err != nil {
-		return fmt.Errorf("failed to get queued torrent for deletion: %w", err)
-	}
-
+func (s *Storage) DeleteQueued(infohash string, cleanup func(t *Torrent) error) error {
+	key := strings.ToLower(infohash)
 	// Perform cleanup if provided
 	if cleanup != nil {
+		// First retrieve the torrent for cleanup
+		torr, err := s.GetQueued(key)
+		if err != nil {
+			return fmt.Errorf("failed to get queued torrent for deletion: %w", err)
+		}
 		if err := cleanup(torr); err != nil {
 			s.logger.Warn().Err(err).Msg("Cleanup function failed for queued torrent")
 		}
@@ -89,9 +88,7 @@ func (s *Storage) DeleteQueued(infohash, category string, cleanup func(t *Torren
 		if bucket == nil {
 			return fmt.Errorf("queued bucket not found")
 		}
-
-		key := []byte(infohash + ":" + category)
-		return bucket.Delete(key)
+		return bucket.Delete([]byte(key))
 	})
 }
 

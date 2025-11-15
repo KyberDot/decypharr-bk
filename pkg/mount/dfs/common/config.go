@@ -1,4 +1,4 @@
-package config
+package common
 
 import (
 	"fmt"
@@ -35,7 +35,6 @@ type FuseConfig struct {
 	Umask              uint32
 	AsyncRead          bool
 	AllowOther         bool
-	AllowRoot          bool
 	DefaultPermissions bool
 
 	// Advanced settings
@@ -46,8 +45,11 @@ type FuseConfig struct {
 	// Health and monitoring
 	StatsInterval time.Duration
 
-	// Smart caching
-	SmartCaching bool
+	// Memory-only mode (no disk caching)
+	MemoryOnlyMode   bool  // Enable pure memory streaming
+	MemoryLimit      int64 // Per-file memory limit (default: 100MB)
+	MemoryChunkSize  int64 // Memory chunk size (default: 2MB)
+	MemoryBufferSize int64 // Ring buffer size (default: 8MB)
 }
 
 // DefaultFuseConfig returns a streaming-optimized default configuration
@@ -59,14 +61,13 @@ func DefaultFuseConfig() *FuseConfig {
 		CacheExpiry:          24 * time.Hour,   // Longer cache for popular content
 		CacheCleanupInterval: 5 * time.Minute,  // More frequent cleanup
 		AsyncRead:            true,
-		FileIdleTimeout:      10 * time.Minute, // Idle file handle timeout
+		FileIdleTimeout:      1 * time.Minute, // Idle file handle timeout
 
 		// File system defaults
 		UID:                1000,
 		GID:                1000,
 		Umask:              0022,
 		AllowOther:         true,
-		AllowRoot:          false,
 		DefaultPermissions: true,
 
 		// Advanced defaults optimized for streaming
@@ -166,14 +167,42 @@ func ParseFuseConfig(mountName string) (*FuseConfig, error) {
 		fuseConfig.MaxConcurrentReads = cfg.MaxConcurrentReads
 	}
 
-	// Smart caching
-	fuseConfig.SmartCaching = cfg.SmartCaching
+	// Memory-only mode configuration
+	fuseConfig.MemoryOnlyMode = cfg.MemoryOnlyMode
+	if cfg.MemoryLimit != "" {
+		size, err := parseSize(cfg.MemoryLimit)
+		if err != nil {
+			return nil, fmt.Errorf("invalid memory limit: %w", err)
+		}
+		fuseConfig.MemoryLimit = size / int64(totalDebrids) // Split among debrids
+	} else {
+		fuseConfig.MemoryLimit = 100 * 1024 * 1024 // Default 100MB per file
+	}
+
+	if cfg.MemoryChunkSize != "" {
+		size, err := parseSize(cfg.MemoryChunkSize)
+		if err != nil {
+			return nil, fmt.Errorf("invalid memory chunk size: %w", err)
+		}
+		fuseConfig.MemoryChunkSize = size
+	} else {
+		fuseConfig.MemoryChunkSize = 2 * 1024 * 1024 // Default 2MB
+	}
+
+	if cfg.MemoryBufferSize != "" {
+		size, err := parseSize(cfg.MemoryBufferSize)
+		if err != nil {
+			return nil, fmt.Errorf("invalid memory buffer size: %w", err)
+		}
+		fuseConfig.MemoryBufferSize = size
+	} else {
+		fuseConfig.MemoryBufferSize = 8 * 1024 * 1024 // Default 8MB
+	}
 
 	// Otherwise keep the default (4) from DefaultFuseConfig()
 	fuseConfig.UID = cfg.UID
 	fuseConfig.GID = cfg.GID
 	fuseConfig.AllowOther = cfg.AllowOther
-	fuseConfig.AllowRoot = cfg.AllowRoot
 	fuseConfig.AsyncRead = cfg.AsyncRead
 	fuseConfig.DefaultPermissions = cfg.DefaultPermissions
 

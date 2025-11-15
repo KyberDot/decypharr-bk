@@ -75,11 +75,11 @@ func (q *QBit) categoryContext(next http.Handler) http.Handler {
 		// Print request method and URL
 		category := strings.Trim(r.URL.Query().Get("category"), "")
 		if category == "" {
-			// Get from form
+			// GetReader from form
 			_ = r.ParseForm()
 			category = r.Form.Get("category")
 			if category == "" {
-				// Get from multipart form
+				// GetReader from multipart form
 				_ = r.ParseMultipartForm(32 << 20)
 				category = r.FormValue("category")
 			}
@@ -210,7 +210,7 @@ func hashesContext(next http.Handler) http.Handler {
 			hashes = strings.Split(_hashes, "|")
 		}
 		if hashes == nil {
-			// Get hashes from form
+			// GetReader hashes from form
 			_ = r.ParseForm()
 			hashes = r.Form["hashes"]
 		}

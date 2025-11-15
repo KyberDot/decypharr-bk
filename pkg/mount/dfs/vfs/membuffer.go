@@ -11,7 +11,6 @@ import (
 )
 
 // MemoryBuffer provides buffering with async disk flushing
-// Architecture: Network → Memory → Async Disk Flush
 type MemoryBuffer struct {
 	// Configuration
 	maxSize    int64 // Maximum memory to use
@@ -22,6 +21,11 @@ type MemoryBuffer struct {
 	chunksMu  sync.RWMutex
 	chunkList *list.List // LRU list for eviction
 	totalSize atomic.Int64
+
+	// OPTIMIZED: Hot chunk protection for streaming playback
+	hotChunks    map[int64]time.Time // Recently accessed chunks (protected from eviction)
+	hotChunksMu  sync.RWMutex
+	hotThreshold time.Duration // How long to keep chunks hot
 
 	// Async flusher
 	flusher     *AsyncFlusher
@@ -35,46 +39,103 @@ type MemoryBuffer struct {
 
 // BufferChunk represents a chunk of data in memory
 type BufferChunk struct {
-	offset     int64
-	data       []byte
-	dirty      atomic.Bool   // Needs to be flushed to disk
-	accessed   atomic.Int64  // Last access time (Unix nano)
-	lruElem    *list.Element // Position in LRU list
-	flushing   atomic.Bool   // Currently being flushed
-	flushDone  chan struct{} // Signals flush completion
-	mu         sync.RWMutex  // Protects data modifications
-	pinned     atomic.Bool   // Prevents eviction (dirty chunks being flushed)
+	offset    int64
+	data      []byte
+	dirty     atomic.Bool   // Needs to be flushed to disk
+	accessed  atomic.Int64  // Last access time (Unix nano)
+	lruElem   *list.Element // Position in LRU list
+	flushing  atomic.Bool   // Currently being flushed
+	flushDone chan struct{} // Signals flush completion
+	mu        sync.RWMutex  // Protects data modifications
+	pinned    atomic.Bool   // Prevents eviction (dirty chunks being flushed)
+	hot       atomic.Bool   // Recently accessed - protected from eviction
 }
 
 // MemBufferStats tracks memory buffer performance
 type MemBufferStats struct {
-	Hits       atomic.Int64
-	Misses     atomic.Int64
-	Evictions  atomic.Int64
-	Flushes    atomic.Int64
-	FlushBytes atomic.Int64
-	MemoryUsed atomic.Int64
+	Hits                  atomic.Int64
+	Misses                atomic.Int64
+	Evictions             atomic.Int64
+	Flushes               atomic.Int64
+	FlushBytes            atomic.Int64
+	MemoryUsed            atomic.Int64
+	HotEvictionsPrevented atomic.Int64 // How many evictions were prevented by hot protection
 }
 
-// NewMemoryBuffer creates a new memory buffer
+// NewMemoryBuffer creates a new memory buffer with hot chunk protection
 func NewMemoryBuffer(ctx context.Context, maxSize, bufferSize int64) *MemoryBuffer {
 	closeCtx, cancel := context.WithCancel(ctx)
 
 	mb := &MemoryBuffer{
-		maxSize:     maxSize,
-		bufferSize:  bufferSize,
-		chunks:      make(map[int64]*BufferChunk),
-		chunkList:   list.New(),
-		flushQueue:  make(chan *BufferChunk, 256),
-		closeCtx:    closeCtx,
-		closeCancel: cancel,
-		stats:       &MemBufferStats{},
+		maxSize:      maxSize,
+		bufferSize:   bufferSize,
+		chunks:       make(map[int64]*BufferChunk),
+		chunkList:    list.New(),
+		hotChunks:    make(map[int64]time.Time),
+		hotThreshold: 5 * time.Second, // Protect chunks for 5 seconds after access
+		flushQueue:   make(chan *BufferChunk, 256),
+		closeCtx:     closeCtx,
+		closeCancel:  cancel,
+		stats:        &MemBufferStats{},
 	}
+
+	// Start hot chunk cleanup goroutine
+	go mb.hotChunkCleanup()
 
 	return mb
 }
 
-// updateLRU moves chunk to front of LRU list
+// hotChunkCleanup periodically cleans up expired hot chunks
+func (mb *MemoryBuffer) hotChunkCleanup() {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			mb.cleanupExpiredHotChunks()
+		case <-mb.closeCtx.Done():
+			return
+		}
+	}
+}
+
+// cleanupExpiredHotChunks removes chunks from hot protection that have expired
+func (mb *MemoryBuffer) cleanupExpiredHotChunks() {
+	now := time.Now()
+	mb.hotChunksMu.Lock()
+	defer mb.hotChunksMu.Unlock()
+
+	for offset, accessTime := range mb.hotChunks {
+		if now.Sub(accessTime) > mb.hotThreshold {
+			delete(mb.hotChunks, offset)
+
+			// Mark chunk as no longer hot
+			mb.chunksMu.RLock()
+			if chunk, exists := mb.chunks[offset]; exists {
+				chunk.hot.Store(false)
+			}
+			mb.chunksMu.RUnlock()
+		}
+	}
+}
+
+// markHot marks a chunk as hot (recently accessed, protected from eviction)
+func (mb *MemoryBuffer) markHot(offset int64) {
+	now := time.Now()
+
+	mb.hotChunksMu.Lock()
+	mb.hotChunks[offset] = now
+	mb.hotChunksMu.Unlock()
+
+	mb.chunksMu.RLock()
+	if chunk, exists := mb.chunks[offset]; exists {
+		chunk.hot.Store(true)
+	}
+	mb.chunksMu.RUnlock()
+}
+
+// updateLRU moves chunk to front of LRU list and marks as hot
 func (mb *MemoryBuffer) updateLRU(chunk *BufferChunk) {
 	mb.chunksMu.Lock()
 	defer mb.chunksMu.Unlock()
@@ -82,6 +143,9 @@ func (mb *MemoryBuffer) updateLRU(chunk *BufferChunk) {
 	if chunk.lruElem != nil {
 		mb.chunkList.MoveToFront(chunk.lruElem)
 	}
+
+	// Mark as hot for streaming protection
+	mb.markHot(chunk.offset)
 }
 
 // AttachFile attaches a file for async flushing
@@ -99,8 +163,7 @@ func (mb *MemoryBuffer) AttachFile(file *os.File) {
 	mb.flusher.UpdateFile(file)
 }
 
-// Get retrieves data from memory if available
-// Returns (data, found)
+// Get retrieves data from memory if available with hot chunk marking
 func (mb *MemoryBuffer) Get(offset, size int64) ([]byte, bool) {
 	mb.chunksMu.RLock()
 
@@ -115,7 +178,7 @@ func (mb *MemoryBuffer) Get(offset, size int64) ([]byte, bool) {
 		chunk.accessed.Store(time.Now().UnixNano())
 		mb.chunksMu.RUnlock()
 
-		// Update LRU separately (no double-locking)
+		// Update LRU and mark as hot
 		mb.updateLRU(chunk)
 
 		mb.stats.Hits.Add(1)
@@ -126,7 +189,7 @@ func (mb *MemoryBuffer) Get(offset, size int64) ([]byte, bool) {
 		return result, true
 	}
 
-	// Try multi-chunk read
+	// Try multi-chunk read with hot marking
 	if exists {
 		result := make([]byte, 0, size)
 		currentOffset := offset
@@ -171,7 +234,7 @@ func (mb *MemoryBuffer) Get(offset, size int64) ([]byte, bool) {
 
 		mb.chunksMu.RUnlock()
 
-		// Update LRU for all accessed chunks
+		// Update LRU and mark all accessed chunks as hot
 		for _, chunk := range chunksToUpdate {
 			mb.updateLRU(chunk)
 		}
@@ -185,7 +248,7 @@ func (mb *MemoryBuffer) Get(offset, size int64) ([]byte, bool) {
 	return nil, false
 }
 
-// Put stores data in memory and marks for async flushing
+// Put stores data in memory with improved space management
 func (mb *MemoryBuffer) Put(offset int64, data []byte) error {
 	dataSize := int64(len(data))
 	if dataSize == 0 {
@@ -237,6 +300,9 @@ func (mb *MemoryBuffer) Put(offset int64, data []byte) error {
 			existing.lruElem = mb.chunkList.PushFront(offset)
 		}
 
+		// Mark as hot since it was just written
+		mb.markHot(offset)
+
 		mb.stats.MemoryUsed.Store(mb.totalSize.Load())
 
 		// Queue for async flush
@@ -260,10 +326,14 @@ func (mb *MemoryBuffer) Put(offset int64, data []byte) error {
 	chunk.accessed.Store(time.Now().UnixNano())
 	chunk.dirty.Store(true)
 	chunk.pinned.Store(true) // Pin while dirty
+	chunk.hot.Store(true)    // New chunks are hot
 
 	// Add to map and LRU list
 	mb.chunks[offset] = chunk
 	chunk.lruElem = mb.chunkList.PushFront(offset)
+
+	// Mark as hot
+	mb.markHot(offset)
 
 	// Update total size
 	mb.totalSize.Add(dataSize)
@@ -280,11 +350,15 @@ func (mb *MemoryBuffer) Put(offset int64, data []byte) error {
 	return nil
 }
 
-// evictLRULocked evicts the least recently used chunk (must be called with lock held)
+// evictLRULocked evicts the least recently used chunk with hot protection
 func (mb *MemoryBuffer) evictLRULocked() bool {
 	// Scan from back of LRU list to find an evictable chunk
 	elem := mb.chunkList.Back()
-	for elem != nil {
+	scannedCount := 0
+	maxScan := mb.chunkList.Len() // Prevent infinite loops
+
+	for elem != nil && scannedCount < maxScan {
+		scannedCount++
 		offset := elem.Value.(int64)
 		chunk, exists := mb.chunks[offset]
 
@@ -302,7 +376,13 @@ func (mb *MemoryBuffer) evictLRULocked() bool {
 			continue
 		}
 
-		// Found evictable chunk
+		// OPTIMIZED: Skip hot chunks to prevent cache thrashing during playback
+		if chunk.hot.Load() {
+			mb.stats.HotEvictionsPrevented.Add(1)
+			elem = elem.Prev()
+			continue
+		}
+
 		// If it's dirty but not pinned, wait for flush to complete
 		if chunk.dirty.Load() {
 			// Try to wait briefly for flush
@@ -316,9 +396,14 @@ func (mb *MemoryBuffer) evictLRULocked() bool {
 			}
 		}
 
-		// Remove from map and list
+		// Found evictable chunk - remove from map and list
 		delete(mb.chunks, offset)
 		mb.chunkList.Remove(elem)
+
+		// Remove from hot chunks if present
+		mb.hotChunksMu.Lock()
+		delete(mb.hotChunks, offset)
+		mb.hotChunksMu.Unlock()
 
 		// Update total size
 		chunkSize := int64(len(chunk.data))
@@ -327,6 +412,33 @@ func (mb *MemoryBuffer) evictLRULocked() bool {
 		mb.stats.Evictions.Add(1)
 
 		return true
+	}
+
+	// If we couldn't find any non-hot chunks to evict, force evict one hot chunk
+	// This prevents deadlock when memory is full of hot chunks
+	elem = mb.chunkList.Back()
+	for elem != nil {
+		offset := elem.Value.(int64)
+		chunk, exists := mb.chunks[offset]
+
+		if exists && !chunk.pinned.Load() && !chunk.dirty.Load() {
+			// Force evict this hot chunk
+			delete(mb.chunks, offset)
+			mb.chunkList.Remove(elem)
+
+			// Remove from hot chunks
+			mb.hotChunksMu.Lock()
+			delete(mb.hotChunks, offset)
+			mb.hotChunksMu.Unlock()
+
+			chunkSize := int64(len(chunk.data))
+			mb.totalSize.Add(-chunkSize)
+			mb.stats.MemoryUsed.Store(mb.totalSize.Load())
+			mb.stats.Evictions.Add(1)
+
+			return true
+		}
+		elem = elem.Prev()
 	}
 
 	return false // No evictable chunks found
@@ -399,10 +511,14 @@ func (mb *MemoryBuffer) Close() error {
 	mb.totalSize.Store(0)
 	mb.chunksMu.Unlock()
 
+	mb.hotChunksMu.Lock()
+	mb.hotChunks = make(map[int64]time.Time)
+	mb.hotChunksMu.Unlock()
+
 	return nil
 }
 
-// GetStats returns buffer statistics
+// GetStats returns buffer statistics including hot chunk protection stats
 func (mb *MemoryBuffer) GetStats() map[string]interface{} {
 	hitRate := 0.0
 	total := mb.stats.Hits.Load() + mb.stats.Misses.Load()
@@ -410,16 +526,23 @@ func (mb *MemoryBuffer) GetStats() map[string]interface{} {
 		hitRate = float64(mb.stats.Hits.Load()) / float64(total) * 100.0
 	}
 
+	mb.hotChunksMu.RLock()
+	hotChunkCount := len(mb.hotChunks)
+	mb.hotChunksMu.RUnlock()
+
 	return map[string]interface{}{
-		"hits":         mb.stats.Hits.Load(),
-		"misses":       mb.stats.Misses.Load(),
-		"hit_rate_pct": hitRate,
-		"evictions":    mb.stats.Evictions.Load(),
-		"flushes":      mb.stats.Flushes.Load(),
-		"flush_bytes":  mb.stats.FlushBytes.Load(),
-		"memory_used":  mb.stats.MemoryUsed.Load(),
-		"memory_limit": mb.maxSize,
-		"chunks_count": mb.chunkList.Len(),
+		"hits":                    mb.stats.Hits.Load(),
+		"misses":                  mb.stats.Misses.Load(),
+		"hit_rate_pct":            hitRate,
+		"evictions":               mb.stats.Evictions.Load(),
+		"hot_evictions_prevented": mb.stats.HotEvictionsPrevented.Load(),
+		"flushes":                 mb.stats.Flushes.Load(),
+		"flush_bytes":             mb.stats.FlushBytes.Load(),
+		"memory_used":             mb.stats.MemoryUsed.Load(),
+		"memory_limit":            mb.maxSize,
+		"chunks_count":            mb.chunkList.Len(),
+		"hot_chunks_count":        hotChunkCount,
+		"hot_threshold_seconds":   mb.hotThreshold.Seconds(),
 	}
 }
 
@@ -441,7 +564,7 @@ func NewAsyncFlusher(ctx context.Context, file *os.File, flushQueue chan *Buffer
 	}
 }
 
-// Run runs the async flusher
+// Run runs the async flusher with improved error handling
 func (af *AsyncFlusher) Run() {
 	af.wg.Add(1)
 	defer af.wg.Done()
@@ -458,7 +581,7 @@ func (af *AsyncFlusher) Run() {
 				continue
 			}
 
-			// Flush to disk
+			// Flush to disk with retry logic
 			chunk.mu.RLock()
 			data := chunk.data
 			offset := chunk.offset
@@ -469,21 +592,28 @@ func (af *AsyncFlusher) Run() {
 			af.mu.RUnlock()
 
 			if file != nil {
-				n, err := file.WriteAt(data, offset)
-				if err == nil && n == len(data) {
-					// Successfully flushed
-					chunk.dirty.Store(false)
-					chunk.pinned.Store(false) // Unpin after successful flush
+				// Retry logic for flush operation
+				success := false
+				for retries := 0; retries < 3 && !success; retries++ {
+					n, err := file.WriteAt(data, offset)
+					if err == nil && n == len(data) {
+						// Successfully flushed
+						chunk.dirty.Store(false)
+						chunk.pinned.Store(false) // Unpin after successful flush
+						success = true
 
-					// Signal flush completion
-					select {
-					case <-chunk.flushDone:
-						// Already closed
-					default:
-						close(chunk.flushDone)
+						// Signal flush completion
+						select {
+						case <-chunk.flushDone:
+							// Already closed
+						default:
+							close(chunk.flushDone)
+						}
+					} else if retries < 2 {
+						// Brief delay before retry
+						time.Sleep(time.Duration(retries+1) * 10 * time.Millisecond)
 					}
 				}
-				// On error, mark as not flushing so it can be retried
 			}
 
 			chunk.flushing.Store(false)
@@ -535,6 +665,3 @@ func (af *AsyncFlusher) UpdateFile(file *os.File) {
 	af.file = file
 	af.mu.Unlock()
 }
-
-// Note: DownloadToMemory was removed - all network reads now use StreamingReader
-// which provides instant playback startup and progressive downloading.

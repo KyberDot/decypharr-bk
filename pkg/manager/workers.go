@@ -132,6 +132,7 @@ func (m *Manager) StartWorker(ctx context.Context) error {
 			jobName := debridName + "-torrents"
 			if _, err := m.scheduler.NewJob(jd, gocron.NewTask(func() {
 				m.refreshTorrents(ctx, debridName, debridClient)
+				m.RefreshEntries(true)
 			}), gocron.WithContext(ctx), gocron.WithName(jobName)); err != nil {
 				m.logger.Error().Err(err).Str("debrid", debridName).Msg("Failed to create torrent refresh job")
 			} else {

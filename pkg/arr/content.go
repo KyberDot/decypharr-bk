@@ -28,7 +28,7 @@ type radarrSearch struct {
 }
 
 func (a *Arr) GetMedia(mediaId string) ([]Content, error) {
-	// Get series
+	// GetReader series
 	type series struct {
 		Title string `json:"title"`
 		Id    int    `json:"id"`
@@ -55,7 +55,7 @@ func (a *Arr) GetMedia(mediaId string) ([]Content, error) {
 	if err = json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return nil, fmt.Errorf("failed to decode series: %v", err)
 	}
-	// Get series files
+	// GetReader series files
 	contents := make([]Content, 0)
 	var seriesFiles []seriesFile
 	for _, d := range data {

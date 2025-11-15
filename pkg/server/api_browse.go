@@ -181,16 +181,11 @@ func (s *Server) handleBrowseGroup(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// Get torrent info hash for deletion support
+		// GetReader torrent info hash for deletion support
 		infoHash := ""
 		canDelete := false
 		if child.IsDir() {
-			// This is a torrent folder
-			torrent, err := s.manager.GetTorrentByName(child.Name())
-			if err == nil && torrent != nil {
-				infoHash = torrent.InfoHash
-				canDelete = true
-			}
+			canDelete = true
 		}
 
 		entries = append(entries, BrowseEntry{
@@ -256,9 +251,6 @@ func (s *Server) handleBrowseTorrentFiles(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Get torrent for info hash
-	torr, _ := s.manager.GetTorrentByName(torrent)
-
 	// Convert to browse entries
 	entries := make([]BrowseEntry, 0, len(children))
 	for _, child := range children {
@@ -308,12 +300,6 @@ func (s *Server) handleBrowseTorrentFiles(w http.ResponseWriter, r *http.Request
 		TotalPages: totalPages,
 		CurrentDir: currentPath,
 		ParentDir:  parentPath,
-	}
-
-	// AddOrUpdate torrent info for context menu actions
-	if torr != nil {
-		w.Header().Set("X-Torrent-Hash", torr.InfoHash)
-		w.Header().Set("X-Torrent-Debrid", torr.ActiveDebrid)
 	}
 
 	utils.JSONResponse(w, response, http.StatusOK)
@@ -421,7 +407,7 @@ func (s *Server) handleGetTorrentInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get available debrids for move operation
+	// GetReader available debrids for move operation
 	debrids := make([]string, 0)
 	for debridName := range torrent.Placements {
 		if debridName != torrent.ActiveDebrid {
@@ -445,7 +431,7 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 	torrentName := utils.PathUnescape(chi.URLParam(r, "torrent"))
 	fileName := utils.PathUnescape(chi.URLParam(r, "file"))
 
-	torrent, err := s.manager.GetTorrentByName(torrentName)
+	torrent, err := s.manager.GetTorrentByFileName(torrentName, fileName)
 	if err != nil || torrent == nil {
 		http.Error(w, "Torrent not found", http.StatusNotFound)
 		return

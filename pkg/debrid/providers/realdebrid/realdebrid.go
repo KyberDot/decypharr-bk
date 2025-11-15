@@ -373,7 +373,7 @@ func (r *RealDebrid) addMagnet(t *types.Torrent) (*types.Torrent, error) {
 		return nil, utils.TooManyActiveDownloadsError
 
 	default:
-		// Get error body (limited to 1024 bytes like original)
+		// GetReader error body (limited to 1024 bytes like original)
 		errorBody := resp.String()
 		if len(errorBody) > 1024 {
 			errorBody = errorBody[:1024]
@@ -415,13 +415,13 @@ func (r *RealDebrid) GetTorrent(torrentId string) (*types.Torrent, error) {
 			Debrid:           r.config.Name,
 		}
 
-		t.Files = r.getTorrentFiles(t, data) // Get selected files
+		t.Files = r.getTorrentFiles(t, data) // GetReader selected files
 		return t, nil
 	case http.StatusNotFound:
 		return nil, utils.TorrentNotFoundError
 
 	default:
-		// Get error body (limited to 1024 bytes like original)
+		// GetReader error body (limited to 1024 bytes like original)
 		errorBody := resp.String()
 		if len(errorBody) > 1024 {
 			errorBody = errorBody[:1024]
@@ -473,7 +473,7 @@ func (r *RealDebrid) UpdateTorrent(t *types.Torrent) error {
 		t.OriginalFilename = data.OriginalFilename
 		t.Links = data.Links
 		t.Debrid = r.config.Name
-		t.Files, _ = r.getSelectedFiles(t, data) // Get selected files
+		t.Files, _ = r.getSelectedFiles(t, data) // GetReader selected files
 
 		return nil
 
@@ -481,7 +481,7 @@ func (r *RealDebrid) UpdateTorrent(t *types.Torrent) error {
 		return utils.TorrentNotFoundError
 
 	default:
-		// Get error body (limited to 1024 bytes like original)
+		// GetReader error body (limited to 1024 bytes like original)
 		errorBody := resp.String()
 		if len(errorBody) > 1024 {
 			errorBody = errorBody[:1024]
@@ -556,7 +556,7 @@ func (r *RealDebrid) CheckStatus(t *types.Torrent) (*types.Torrent, error) {
 			}
 		} else if debridStatus == "downloaded" {
 			t.Status = types.TorrentStatusDownloaded
-			t.Files, err = r.getSelectedFiles(t, data) // Get selected files
+			t.Files, err = r.getSelectedFiles(t, data) // GetReader selected files
 			if err != nil {
 				return t, err
 			}
@@ -798,7 +798,7 @@ func (r *RealDebrid) GetTorrents() ([]*types.Torrent, error) {
 	}
 	hardLimit := r.config.Limit
 
-	// Get first batch and total count
+	// GetReader first batch and total count
 	allTorrents := make([]*types.Torrent, 0)
 	var fetchError error
 	offset := 0

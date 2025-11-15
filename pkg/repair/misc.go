@@ -55,7 +55,7 @@ func (r *Repair) checkTorrentFiles(torrentPath string, files []arr.ContentFile, 
 
 	r.logger.Debug().Msgf("Checking %s", torrentPath)
 
-	// Get the debrid client
+	// GetReader the debrid client
 	dir := filepath.Dir(torrentPath)
 	debridName := r.findDebridForPath(dir, clients)
 	if debridName == "" {
@@ -65,7 +65,7 @@ func (r *Repair) checkTorrentFiles(torrentPath string, files []arr.ContentFile, 
 
 	// Check if torrent exists in manager
 	torrentName := filepath.Clean(filepath.Base(torrentPath))
-	torrent, err := mgr.GetTorrentByName(torrentName)
+	entry, err := mgr.GetEntry(torrentName)
 	if err != nil {
 		r.logger.Debug().Msgf("Can't find torrent %s in manager. Marking as broken", torrentName)
 		// Return all files as broken
@@ -78,7 +78,7 @@ func (r *Repair) checkTorrentFiles(torrentPath string, files []arr.ContentFile, 
 		filePaths[i] = file.TargetPath
 	}
 
-	brokenFilePaths := mgr.GetBrokenFiles(torrent, filePaths)
+	brokenFilePaths := mgr.GetBrokenFiles(entry, filePaths)
 	if len(brokenFilePaths) > 0 {
 		r.logger.Debug().Msgf("%d broken files found in %s", len(brokenFilePaths), torrentName)
 

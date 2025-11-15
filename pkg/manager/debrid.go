@@ -12,6 +12,7 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/debrid/providers/realdebrid"
 	"github.com/sirrobot01/decypharr/pkg/debrid/providers/torbox"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
+	"github.com/sirrobot01/decypharr/pkg/storage"
 	"go.uber.org/ratelimit"
 )
 
@@ -30,13 +31,15 @@ func (m *Manager) DebridClient(name string) debrid.Client {
 func (m *Manager) initDebridClients() {
 	cfg := config.Get()
 	for _, dc := range cfg.Debrids {
+		if m.firstDebrid == "" {
+			m.firstDebrid = dc.Name
+		}
 		client, err := m.createClient(dc)
 		if err != nil {
 			m.logger.Error().Err(err).Str("debrid", dc.Name).Msg("Failed to create debrid client")
 			continue
 		}
 		m.clients.Store(dc.Name, client)
-		m.logger.Info().Str("debrid", dc.Name).Msg("Debrid client initialized")
 	}
 }
 
@@ -89,31 +92,29 @@ func (m *Manager) FilterDebrid(filter func(debrid.Client) bool) []debrid.Client 
 }
 
 func (m *Manager) GetIngests() ([]types.IngestData, error) {
-	torrents, err := m.GetTorrents(nil)
-	if err != nil {
-		return nil, err
-	}
+	// Use streaming to avoid loading all torrents into memory
 	var ingests []types.IngestData
-	for _, torrent := range torrents {
+	err := m.storage.ForEach(func(torrent *storage.Torrent) error {
 		ingests = append(ingests, types.IngestData{
 			Debrid: torrent.ActiveDebrid,
 			Name:   torrent.OriginalFilename,
 			Hash:   torrent.InfoHash,
 			Size:   torrent.Bytes,
 		})
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return ingests, nil
 }
 
 func (m *Manager) GetIngestsByDebrid(debridName string) ([]types.IngestData, error) {
-	torrents, err := m.GetTorrents(nil)
-	if err != nil {
-		return nil, err
-	}
+	// Use streaming to avoid loading all torrents into memory
 	var ingests []types.IngestData
-	for _, torrent := range torrents {
-		if !torrent.HasPlacement(debridName, torrent.InfoHash) {
-			continue
+	err := m.storage.ForEach(func(torrent *storage.Torrent) error {
+		if !torrent.HasPlacement(debridName) {
+			return nil
 		}
 		ingests = append(ingests, types.IngestData{
 			Debrid: torrent.ActiveDebrid,
@@ -121,6 +122,10 @@ func (m *Manager) GetIngestsByDebrid(debridName string) ([]types.IngestData, err
 			Hash:   torrent.InfoHash,
 			Size:   torrent.Bytes,
 		})
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return ingests, nil
 }

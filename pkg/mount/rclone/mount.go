@@ -69,7 +69,7 @@ func NewMount(mountName string, mgr *manager.Manager, rcClient *rclone.Client) (
 		logger:    _logger,
 		client:    rcClient,
 	}
-	mgr.SetEventHandlers(manager.NewEventHandlers(m))
+	mgr.AddEventHandlers(mountName, manager.NewEventHandlers(m))
 	return m, nil
 }
 
@@ -99,16 +99,11 @@ func (m *Mount) Start(ctx context.Context) error {
 		return fmt.Errorf("rclone RC server is not reachable: %w", err)
 	}
 
-	m.logger.Info().Msg("Creating mount via RC")
-
 	if err := m.mountWithRetry(3); err != nil {
 		m.logger.Error().Msg("Mount operation failed")
 		return fmt.Errorf("mount failed for %s", m.Provider)
 	}
-
 	go m.MonitorMounts(ctx)
-
-	m.logger.Info().Msgf("Successfully mounted")
 	return nil
 }
 

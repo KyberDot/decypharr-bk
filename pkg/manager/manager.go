@@ -24,14 +24,15 @@ import (
 
 // Manager handles unified torrent management - replaces wire.Store completely
 type Manager struct {
-	storage    *storage.Storage
-	migrator   *Migrator
-	clients    *xsync.Map[string, debrid.Client]
-	arr        *arr.Storage
-	logger     zerolog.Logger
-	ready      chan struct{}
-	readyOnce  sync.Once
-	mountPaths map[string]*FileInfo
+	storage     *storage.Storage
+	migrator    *Migrator
+	clients     *xsync.Map[string, debrid.Client]
+	arr         *arr.Storage
+	logger      zerolog.Logger
+	ready       chan struct{}
+	readyOnce   sync.Once
+	mountPaths  map[string]*FileInfo
+	firstDebrid string
 
 	// Migration jobs tracking
 	migrationJobs   *xsync.Map[string, *storage.SwitcherJob]
@@ -59,12 +60,11 @@ type Manager struct {
 	ctx   context.Context
 
 	customFolders *CustomFolders
-	streamClient  *http.Client
 	mountManager  MountManager
 
 	startTime time.Time
 
-	event *Event
+	events *xsync.Map[string, *EventHandler]
 
 	rootInfo   *FileInfo
 	entry      *EntryCache
@@ -131,7 +131,7 @@ func New() *Manager {
 		ReadBufferSize:  256 * 1024, // 256KB read buffer (faster downloads)
 	}
 
-	streamClient := &http.Client{
+	_ = &http.Client{
 		Timeout:   0, // No timeout for streaming
 		Transport: transport,
 	}
@@ -149,8 +149,8 @@ func New() *Manager {
 		failedLinksCounter:   xsync.NewMap[string, atomic.Int32](),
 		torrentErrorCounters: xsync.NewMap[string, atomic.Int32](),
 		ctx:                  ctx,
-		streamClient:         streamClient,
 		ready:                make(chan struct{}),
+		events:               xsync.NewMap[string, *EventHandler](),
 	}
 
 	instance.init()
@@ -193,6 +193,12 @@ func (m *Manager) init() {
 	m.migrator = NewMigrator(m.storage)
 	m.downloader = NewDownloadManager(m)
 
+	// Initialize HTTP pool for streaming
+	// Note: We can't create a single pool for all files because the LinkRefresh callback
+	// needs torrent+filename context. Instead, manager.Stream will create a pool per request
+	// and cache it. This is actually better because different files may have different
+	// download links from different CDNs.
+
 	refreshInterval, err := time.ParseDuration(cfg.RefreshInterval)
 	if err != nil {
 		refreshInterval = 15 * time.Minute
@@ -228,7 +234,7 @@ func (m *Manager) migrate() {
 		return
 	}
 
-	// Get migration stats to see if there are cache files
+	// GetReader migration stats to see if there are cache files
 	stats, err := m.migrator.GetStats()
 	if err != nil {
 		m.logger.Warn().Err(err).Msg("Failed to get migration stats")
@@ -271,6 +277,7 @@ func (m *Manager) sync(ctx context.Context) error {
 		go func() {
 			defer wg.Done()
 			m.refreshTorrents(ctx, name, client)
+			m.RefreshEntries(false)
 		}()
 		return true
 	})
@@ -374,11 +381,11 @@ func (m *Manager) GetStats() (map[string]interface{}, error) {
 	failedJobs := 0
 	m.migrationJobs.Range(func(_ string, job *storage.SwitcherJob) bool {
 		switch job.Status {
-		case "pending", "submitting", "downloading":
+		case storage.SwitcherStatusPending, storage.SwitcherStatusInProgress:
 			activeJobs++
-		case "completed":
+		case storage.SwitcherStatusCompleted:
 			completedJobs++
-		case "failed", "cancelled":
+		case storage.SwitcherStatusFailed, storage.SwitcherStatusCancelled:
 			failedJobs++
 		}
 		return true
@@ -407,6 +414,27 @@ func (m *Manager) StartTime() time.Time {
 
 // CRUD operations
 
+func (m *Manager) GetEntry(torrentName string) (*storage.TorrentEntry, error) {
+	return m.storage.GetEntry(torrentName)
+}
+
+func (m *Manager) GetTorrentByFileName(torrentName, filename string) (*storage.Torrent, error) {
+	// First get entry
+	entry, err := m.storage.GetEntry(torrentName)
+	if err != nil {
+		return nil, err
+	}
+
+	// Find the file in the entry
+	file, err := entry.GetFile(filename)
+	if err != nil {
+		return nil, err
+	}
+
+	// GetReader the torrent by infohash
+	return m.GetTorrent(file.InfoHash)
+}
+
 func (m *Manager) AddOrUpdate(torrent *storage.Torrent, callback func(t *storage.Torrent)) error {
 	torrent.UpdatedAt = time.Now()
 	if err := m.storage.AddOrUpdate(torrent); err != nil {
@@ -423,17 +451,20 @@ func (m *Manager) GetTorrent(infohash string) (*storage.Torrent, error) {
 	return m.storage.Get(infohash)
 }
 
-func (m *Manager) GetTorrentByHashAndCategory(infohash, category string) (*storage.Torrent, error) {
-	return m.storage.GetByHashAndCategory(infohash, category)
-}
-
-// GetTorrentByName gets a torrent by name
-func (m *Manager) GetTorrentByName(name string) (*storage.Torrent, error) {
-	return m.storage.GetByName(name)
+func (m *Manager) GetTorrentByHashAndCategory(infohash string) (*storage.Torrent, error) {
+	return m.storage.GetByHashAndCategory(infohash)
 }
 
 func (m *Manager) GetTorrents(filter func(*storage.Torrent) bool) ([]*storage.Torrent, error) {
-	return m.storage.List(filter)
+	// Use streaming to avoid loading all torrents into memory at once
+	var torrents []*storage.Torrent
+	err := m.storage.ForEach(func(t *storage.Torrent) error {
+		if filter == nil || filter(t) {
+			torrents = append(torrents, t)
+		}
+		return nil
+	})
+	return torrents, err
 }
 
 func (m *Manager) GetTorrentsCount() (int, error) {

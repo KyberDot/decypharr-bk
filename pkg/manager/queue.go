@@ -120,15 +120,15 @@ func (q *Queue) Add(torrent *storage.Torrent) error {
 	return q.storage.AddQueue(torrent)
 }
 
-func (q *Queue) GetTorrent(infohash, category string) (*storage.Torrent, error) {
-	return q.storage.GetQueued(infohash, category)
+func (q *Queue) GetTorrent(infohash string) (*storage.Torrent, error) {
+	return q.storage.GetQueued(infohash)
 }
 
-func (q *Queue) Delete(infohash, category string, cleanup func(t *storage.Torrent) error) error {
-	return q.storage.DeleteQueued(infohash, category, cleanup)
+func (q *Queue) Delete(infohash string, cleanup func(t *storage.Torrent) error) error {
+	return q.storage.DeleteQueued(infohash, cleanup)
 }
 
-func (q *Queue) DeleteWhere(category, state string, hashes []string, cleanup func(t *storage.Torrent) error) error {
+func (q *Queue) DeleteWhere(category string, state storage.TorrentState, hashes []string, cleanup func(t *storage.Torrent) error) error {
 	return q.storage.DeleteWhereQueued(q.ListFilterFunc(category, state, hashes), cleanup)
 }
 
@@ -144,7 +144,7 @@ func (q *Queue) Update(torrent *storage.Torrent) error {
 	return q.storage.UpdateQueue(torrent)
 }
 
-func (q *Queue) ListFilterFunc(category, state string, hashes []string) func(*storage.Torrent) bool {
+func (q *Queue) ListFilterFunc(category string, state storage.TorrentState, hashes []string) func(*storage.Torrent) bool {
 	hashSet := make(map[string]struct{}, len(hashes))
 	if len(hashes) > 0 {
 		for _, h := range hashes {
@@ -172,7 +172,7 @@ func (q *Queue) ListFilterFunc(category, state string, hashes []string) func(*st
 	return filterFunc
 }
 
-func (q *Queue) ListFilter(category, state string, hashes []string, sortBy string, reverse bool) []*storage.Torrent {
+func (q *Queue) ListFilter(category string, state storage.TorrentState, hashes []string, sortBy string, reverse bool) []*storage.Torrent {
 	filterFunc := q.ListFilterFunc(category, state, hashes)
 	torrents, err := q.storage.FilterQueued(filterFunc)
 	if err != nil {

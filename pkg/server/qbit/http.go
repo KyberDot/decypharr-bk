@@ -75,7 +75,7 @@ func (q *QBit) handleTorrentsInfo(w http.ResponseWriter, r *http.Request) {
 
 	// Convert hashes to filter function
 
-	torrents := q.manager.Queue().ListFilter(category, state, hashes, "added_on", false)
+	torrents := q.manager.Queue().ListFilter(category, storage.TorrentState(state), hashes, "added_on", false)
 	qbitTorrents := make([]Torrent, len(torrents))
 	for i, t := range torrents {
 		qbitTorrents[i] = convertToQBitTorrentTorrent(t)
@@ -173,7 +173,8 @@ func (q *QBit) handleTorrentsDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, hash := range hashes {
-		err := q.manager.Queue().Delete(hash, getCategory(ctx), nil)
+		q.logger.Debug().Msgf("Deleting torrent %s", hash)
+		err := q.manager.Queue().Delete(hash, nil)
 		if err != nil {
 			q.logger.Warn().Err(err).Msgf("Error deleting torrent")
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -187,13 +188,12 @@ func (q *QBit) handleTorrentsDelete(w http.ResponseWriter, r *http.Request) {
 func (q *QBit) handleTorrentsPause(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	hashes := getHashes(ctx)
-	category := getCategory(ctx)
 	for _, hash := range hashes {
-		torr, err := q.manager.Queue().GetTorrent(hash, category)
+		torrent, err := q.manager.Queue().GetTorrent(hash)
 		if err != nil {
 			continue
 		}
-		go q.PauseTorrent(torr)
+		go q.PauseTorrent(torrent)
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -202,13 +202,12 @@ func (q *QBit) handleTorrentsPause(w http.ResponseWriter, r *http.Request) {
 func (q *QBit) handleTorrentsResume(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	hashes := getHashes(ctx)
-	category := getCategory(ctx)
 	for _, hash := range hashes {
-		torr, err := q.manager.Queue().GetTorrent(hash, category)
+		torrent, err := q.manager.Queue().GetTorrent(hash)
 		if err != nil {
 			continue
 		}
-		go q.ResumeTorrent(torr)
+		go q.ResumeTorrent(torrent)
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -217,13 +216,12 @@ func (q *QBit) handleTorrentsResume(w http.ResponseWriter, r *http.Request) {
 func (q *QBit) handleTorrentRecheck(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	hashes := getHashes(ctx)
-	category := getCategory(ctx)
 	for _, hash := range hashes {
-		torr, err := q.manager.Queue().GetTorrent(hash, category)
+		torrent, err := q.manager.Queue().GetTorrent(hash)
 		if err != nil {
 			continue
 		}
-		go q.RefreshTorrent(torr)
+		go q.RefreshTorrent(torrent)
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -260,28 +258,25 @@ func (q *QBit) handleCreateCategory(w http.ResponseWriter, r *http.Request) {
 }
 
 func (q *QBit) handleTorrentProperties(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
 	hash := r.URL.Query().Get("hash")
-	category := getCategory(ctx)
-	torr, err := q.manager.Queue().GetTorrent(hash, category)
+	torrent, err := q.manager.Queue().GetTorrent(hash)
 	if err != nil {
 		http.Error(w, "Torrent not found", http.StatusNotFound)
 		return
 	}
 
-	properties := q.GetTorrentProperties(torr)
+	properties := q.GetTorrentProperties(torrent)
 	utils.JSONResponse(w, properties, http.StatusOK)
 }
 
 func (q *QBit) handleTorrentFiles(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
 	hash := r.URL.Query().Get("hash")
-	torr, err := q.manager.Queue().GetTorrent(hash, getCategory(ctx))
+	torrent, err := q.manager.Queue().GetTorrent(hash)
 	if err != nil {
 		http.Error(w, "Torrent not found", http.StatusNotFound)
 		return
 	}
-	utils.JSONResponse(w, torr.Files, http.StatusOK)
+	utils.JSONResponse(w, getTorrentFiles(torrent), http.StatusOK)
 }
 
 func (q *QBit) handleSetCategory(w http.ResponseWriter, r *http.Request) {
@@ -346,8 +341,8 @@ func (q *QBit) handleRemoveTorrentTags(w http.ResponseWriter, r *http.Request) {
 		tags[i] = strings.TrimSpace(tag)
 	}
 	torrents := q.manager.Queue().ListFilter("", "", hashes, "", false)
-	for _, torr := range torrents {
-		q.removeTorrentTags(torr, tags)
+	for _, torrent := range torrents {
+		q.removeTorrentTags(torrent, tags)
 
 	}
 	utils.JSONResponse(w, nil, http.StatusOK)

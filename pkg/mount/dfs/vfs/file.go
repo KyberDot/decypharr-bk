@@ -12,7 +12,7 @@ import (
 
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/sirrobot01/decypharr/pkg/manager"
-	"github.com/sirrobot01/decypharr/pkg/mount/dfs/vfs/ranges"
+	"github.com/sirrobot01/decypharr/pkg/mount/dfs/common"
 )
 
 // Buffer pool for streaming downloads (128KB buffers)
@@ -38,6 +38,16 @@ type downloadJob struct {
 	thresholdOnce   sync.Once     // Ensures threshold signal sent only once
 }
 
+// PlaybackState tracks sequential read patterns for optimization
+type PlaybackState struct {
+	lastReadOffset     atomic.Int64                    // Last read position
+	sequentialReads    atomic.Int64                    // Count of sequential reads
+	activeStreamReader atomic.Pointer[StreamingReader] // Current stream reader
+	playbackActive     atomic.Bool                     // Is this file being actively played?
+	lastAccessTime     atomic.Int64                    // When was this file last accessed
+	mu                 sync.RWMutex                    // Protects stream reader updates
+}
+
 // File represents a cached remote file with integrated download capabilities
 // Combines sparse file tracking, download logic, and prefetching in a single efficient struct
 type File struct {
@@ -48,7 +58,7 @@ type File struct {
 
 	// On-disk file and range tracking
 	file       *os.File
-	ranges     *ranges.Ranges // Lazy-loaded from metadata
+	ranges     *common.Ranges // Lazy-loaded from metadata
 	rangesOnce sync.Once      // Ensures ranges are loaded exactly once
 
 	// Memory buffer (ultra-fast memory-first caching)
@@ -60,12 +70,14 @@ type File struct {
 	// Active downloads tracking
 	downloading *xsync.Map[int64, *downloadJob]
 
+	// OPTIMIZATION: Playback state tracking
+	playbackState *PlaybackState
+
 	// Stats and lifecycle
 	stats           *StatsTracker
 	manager         *manager.Manager // Reference to save metadata
 	vfsManager      *Manager         // Reference to VFS manager
 	lastAccess      atomic.Int64
-	lastReadOffset  atomic.Int64 // Track last read offset for sequential detection
 	modTime         time.Time
 	dirty           bool // Has unflushed changes to metadata
 	bytesDownloaded atomic.Int64
@@ -105,40 +117,42 @@ func newFile(cacheDir string, info *manager.FileInfo, chunkSize, readAhead int64
 	bufferCtx := context.Background()
 	memBufferSize := vfsManager.config.BufferSize
 	if memBufferSize <= 0 {
-		// OPTIMIZED: Reduced from 64MB to 16MB to prevent memory explosion
-		// 16MB is still enough for smooth playback (holds ~2 chunks of 8MB)
-		memBufferSize = 16 * 1024 * 1024 // Default 16MB if not configured
+		// OPTIMIZED: Increased from 16MB to 32MB for better streaming buffering
+		// 32MB provides better buffering for high-bitrate content
+		memBufferSize = 32 * 1024 * 1024 // Default 32MB if not configured
 	}
 	memBuffer := NewMemoryBuffer(bufferCtx, memBufferSize, chunkSize)
 	memBuffer.AttachFile(file) // Attach for async flushing
 
 	f := &File{
-		path:        cachePath,
-		info:        info,
-		chunkSize:   chunkSize,
-		file:        file,
-		ranges:      nil, // Lazy-loaded via rangesOnce
-		memBuffer:   memBuffer,
-		readAhead:   readAhead,
-		downloading: xsync.NewMap[int64, *downloadJob](),
-		stats:       stats,
-		manager:     manager,
-		vfsManager:  vfsManager,
-		modTime:     info.ModTime(),
-		dirty:       false,
-		closeChan:   make(chan struct{}),
+		path:          cachePath,
+		info:          info,
+		chunkSize:     chunkSize,
+		file:          file,
+		ranges:        nil, // Lazy-loaded via rangesOnce
+		memBuffer:     memBuffer,
+		readAhead:     readAhead,
+		downloading:   xsync.NewMap[int64, *downloadJob](),
+		stats:         stats,
+		manager:       manager,
+		vfsManager:    vfsManager,
+		modTime:       info.ModTime(),
+		dirty:         false,
+		closeChan:     make(chan struct{}),
+		playbackState: &PlaybackState{},
 	}
 
 	f.lastAccess.Store(time.Now().UnixNano())
-
-	// Initialize last read offset to -1 (no previous read)
-	f.lastReadOffset.Store(-1)
+	f.playbackState.lastReadOffset.Store(-1)
+	f.playbackState.lastAccessTime.Store(time.Now().UnixNano())
 
 	return f, nil
 }
 
 func (f *File) touchAccess() {
-	f.lastAccess.Store(time.Now().UnixNano())
+	now := time.Now().UnixNano()
+	f.lastAccess.Store(now)
+	f.playbackState.lastAccessTime.Store(now)
 }
 
 func (f *File) lastAccessTime() time.Time {
@@ -147,6 +161,40 @@ func (f *File) lastAccessTime() time.Time {
 		return time.Time{}
 	}
 	return time.Unix(0, ts)
+}
+
+// isSequentialRead checks if this read follows the previous read (indicating streaming playback)
+func (f *File) isSequentialRead(offset int64, size int64) bool {
+	lastOffset := f.playbackState.lastReadOffset.Load()
+	if lastOffset == -1 {
+		// First read
+		return true
+	}
+
+	// Consider sequential if this read starts within 1 chunk of where the last read ended
+	// This handles slight overlaps or gaps that video players sometimes create
+	tolerance := f.chunkSize
+	expectedOffset := lastOffset
+
+	return offset >= (expectedOffset-tolerance) && offset <= (expectedOffset+tolerance)
+}
+
+// updatePlaybackState updates playback tracking after a read
+func (f *File) updatePlaybackState(offset int64, bytesRead int) {
+	f.playbackState.lastReadOffset.Store(offset + int64(bytesRead))
+
+	if f.isSequentialRead(offset, int64(bytesRead)) {
+		// Sequential read detected
+		current := f.playbackState.sequentialReads.Add(1)
+		if current >= 3 {
+			// 3+ sequential reads = active playback
+			f.playbackState.playbackActive.Store(true)
+		}
+	} else {
+		// Non-sequential read (seek) - reset counter but don't disable playback immediately
+		f.playbackState.sequentialReads.Store(0)
+		// Keep playbackActive true for a while to handle seeks during playback
+	}
 }
 
 // ensureFileOpen lazily (re)opens the on-disk sparse file if it was closed.
@@ -181,7 +229,7 @@ func (f *File) ensureFileOpen() error {
 // ensureRangesLoaded ensures ranges are loaded exactly once (thread-safe)
 func (f *File) ensureRangesLoaded() {
 	f.rangesOnce.Do(func() {
-		f.ranges = ranges.New()
+		f.ranges = common.NewRanges()
 		if !f.loadCachedMetadata() {
 			_ = f.scanExistingData()
 		}
@@ -260,7 +308,7 @@ func (f *File) scanExistingData() error {
 			if chunkEnd > f.info.Size() {
 				chunkEnd = f.info.Size()
 			}
-			f.ranges.Insert(ranges.Range{
+			f.ranges.Insert(common.Range{
 				Pos:  offset,
 				Size: chunkEnd - offset,
 			})
@@ -285,7 +333,7 @@ func (f *File) readAt(p []byte, offset int64) (n int, cached bool, err error) {
 
 	f.touchAccess()
 
-	requestedRange := ranges.Range{Pos: offset, Size: int64(len(p))}
+	requestedRange := common.Range{Pos: offset, Size: int64(len(p))}
 
 	// Check if requested range is fully cached
 	if f.ranges.Present(requestedRange) {
@@ -346,7 +394,7 @@ func (f *File) WriteAt(p []byte, offset int64) (int, error) {
 
 	// Mark this range as cached
 	if n > 0 {
-		f.ranges.Insert(ranges.Range{
+		f.ranges.Insert(common.Range{
 			Pos:  offset,
 			Size: int64(n),
 		})
@@ -395,6 +443,11 @@ func (f *File) closeFD() error {
 // Close closes the file and stops all downloads
 func (f *File) Close() error {
 	var firstErr error
+
+	// Close any active streaming reader
+	if sr := f.playbackState.activeStreamReader.Load(); sr != nil {
+		_ = sr.Close()
+	}
 
 	if err := f.persistMetadata(true); err != nil {
 		firstErr = err
@@ -491,7 +544,7 @@ func (f *File) GetCachedSize() int64 {
 }
 
 // GetCachedRanges returns all cached ranges (for debugging/stats)
-func (f *File) GetCachedRanges() []ranges.Range {
+func (f *File) GetCachedRanges() []common.Range {
 	// Ensure ranges are loaded exactly once (no lock upgrade needed!)
 	f.ensureRangesLoaded()
 
@@ -505,7 +558,7 @@ func (f *File) GetCachedRanges() []ranges.Range {
 }
 
 // FindMissing returns ranges that need to be downloaded
-func (f *File) FindMissing(offset, length int64) []ranges.Range {
+func (f *File) FindMissing(offset, length int64) []common.Range {
 	// Ensure ranges are loaded exactly once (no lock upgrade needed!)
 	f.ensureRangesLoaded()
 
@@ -514,10 +567,10 @@ func (f *File) FindMissing(offset, length int64) []ranges.Range {
 
 	if f.ranges == nil {
 		// If ranges failed to load, assume everything is missing
-		return []ranges.Range{{Pos: offset, Size: length}}
+		return []common.Range{{Pos: offset, Size: length}}
 	}
 
-	return f.ranges.FindMissing(ranges.Range{
+	return f.ranges.FindMissing(common.Range{
 		Pos:  offset,
 		Size: length,
 	})
@@ -536,15 +589,13 @@ func (f *File) IsCached(offset, length int64) bool {
 		return false
 	}
 
-	return f.ranges.Present(ranges.Range{
+	return f.ranges.Present(common.Range{
 		Pos:  offset,
 		Size: length,
 	})
 }
 
-// ReadAt reads data with progressive download for instant playback start
-// Uses ring buffer streaming for large sequential reads (instant playback)
-// Falls back to chunk-based caching for random/small reads
+// OPTIMIZED: ReadAt with persistent streaming and better caching
 func (f *File) ReadAt(ctx context.Context, p []byte, offset int64) (int, error) {
 	size := f.info.Size()
 	if offset >= size {
@@ -560,16 +611,16 @@ func (f *File) ReadAt(ctx context.Context, p []byte, offset int64) (int, error) 
 	f.touchAccess()
 
 	// FAST PATH: Check memory buffer first (< 1ms)
-	if f.memBuffer != nil {
-		data, found := f.memBuffer.Get(offset, readSize)
-		if found {
-			// Memory hit! Ultra-fast return
-			n := copy(p, data)
-			f.lastReadOffset.Store(offset + int64(n))
-			// Trigger prefetch in background
-			go f.aggressiveSequentialPrefetch(ctx, offset+readSize)
-			return n, nil
+	data, found := f.memBuffer.Get(offset, readSize)
+	if found {
+		// Memory hit! Ultra-fast return
+		n := copy(p, data)
+		f.updatePlaybackState(offset, n)
+		// Trigger prefetch in background for active playback
+		if f.playbackState.playbackActive.Load() {
+			go f.intelligentPrefetch(ctx, offset+readSize)
 		}
+		return n, nil
 	}
 
 	// Check if fully cached on disk (zero-allocation check)
@@ -581,55 +632,123 @@ func (f *File) ReadAt(ctx context.Context, p []byte, offset int64) (int, error) 
 			if f.memBuffer != nil && n > 0 {
 				_ = f.memBuffer.Put(offset, p[:n])
 			}
-			// Update last read offset for sequential detection
-			f.lastReadOffset.Store(offset + int64(n))
-			go f.aggressiveSequentialPrefetch(ctx, offset+readSize)
+			f.updatePlaybackState(offset, n)
+
+			// Trigger prefetch for active playback
+			if f.playbackState.playbackActive.Load() {
+				go f.intelligentPrefetch(ctx, offset+readSize)
+			}
 		}
 		return n, err
 	}
 
 	// Cache miss - need to download
-	// Track active read
 	f.stats.TrackActiveRead(1)
 	defer f.stats.TrackActiveRead(-1)
 
-	// ALWAYS use streaming for network reads - provides instant playback
-	// StreamingReader efficiently handles ALL read patterns:
-	// - Sequential reads (video): Instant startup, continuous streaming
-	// - Random reads (seeks): Returns first chunk immediately
-	// - Small reads (metadata): Minimal overhead, quick return
+	// For sequential reads during active playback, use persistent streaming
+	if f.isSequentialRead(offset, readSize) && f.playbackState.playbackActive.Load() {
+		return f.persistentStreamingRead(ctx, p, offset)
+	}
+
+	// For non-sequential reads, use optimized chunk-based download
+	return f.chunkBasedRead(ctx, p, offset)
+}
+
+// persistentStreamingRead uses a persistent StreamingReader for continuous playback
+func (f *File) persistentStreamingRead(ctx context.Context, p []byte, offset int64) (int, error) {
+	// Try to reuse existing streaming reader
+	currentSR := f.playbackState.activeStreamReader.Load()
+
+	if currentSR != nil && currentSR.CanServe(offset, int64(len(p))) {
+		// Reuse existing reader with ReadAt for efficient seeking
+		n, err := currentSR.ReadAt(p, offset)
+		if err == nil {
+			// Store in memory buffer
+			if f.memBuffer != nil && n > 0 {
+				_ = f.memBuffer.Put(offset, p[:n])
+			}
+			f.updatePlaybackState(offset, n)
+			return n, nil
+		}
+
+		// Error with current reader, will create new one below
+		_ = currentSR.Close()
+		f.playbackState.activeStreamReader.Store(nil)
+	}
+
+	// Create new streaming reader for larger range
+	// For video playback, read ahead more aggressively
+	readAheadSize := f.readAhead
+	if readAheadSize < 32*1024*1024 { // Minimum 32MB for smooth video
+		readAheadSize = 32 * 1024 * 1024
+	}
+
+	endOffset := offset + readAheadSize
+	if endOffset > f.info.Size() {
+		endOffset = f.info.Size()
+	}
+
+	newSR := NewStreamingReader(ctx, f.manager, f.info, offset, endOffset, f)
+	f.playbackState.activeStreamReader.Store(newSR)
+
+	// Read from new streaming reader
+	n, err := newSR.ReadAt(p, offset)
+	if err == nil {
+		// Store in memory buffer
+		if f.memBuffer != nil && n > 0 {
+			_ = f.memBuffer.Put(offset, p[:n])
+		}
+		f.updatePlaybackState(offset, n)
+
+		// Start background prefetch
+		go f.intelligentPrefetch(ctx, offset+int64(n))
+	}
+
+	return n, err
+}
+
+// chunkBasedRead handles non-sequential reads efficiently
+func (f *File) chunkBasedRead(ctx context.Context, p []byte, offset int64) (int, error) {
+	// Use the existing streamingReadAt but with improvements
 	n, err := f.streamingReadAt(ctx, p, offset)
 	if err == nil {
 		// Store in memory buffer for future fast access
 		if f.memBuffer != nil && n > 0 {
 			_ = f.memBuffer.Put(offset, p[:n])
 		}
-		// Update last read offset
-		f.lastReadOffset.Store(offset + int64(n))
-
-		// Start background prefetch for smooth playback
-		go f.aggressiveSequentialPrefetch(ctx, offset+readSize)
+		f.updatePlaybackState(offset, n)
 	}
 	return n, err
 }
 
-// aggressiveSequentialPrefetch downloads chunks ahead for smooth playback
-// OPTIMIZED: Reduced from 6 chunks to 2-3 chunks to prevent memory explosion
-func (f *File) aggressiveSequentialPrefetch(ctx context.Context, currentOffset int64) {
-	if f.closed.Load() {
+// intelligentPrefetch downloads chunks ahead intelligently based on playback patterns
+func (f *File) intelligentPrefetch(ctx context.Context, currentOffset int64) {
+	if f.closed.Load() || !f.playbackState.playbackActive.Load() {
 		return
 	}
 
-	// Download 2-3 chunks ahead (reduced from 6 to save memory)
-	// With 8MB chunks: 2-3 chunks = 16-24MB (vs 48MB before)
-	numChunks := int64(2)
+	// More intelligent prefetch based on playback state
+	sequentialCount := f.playbackState.sequentialReads.Load()
+
+	// Determine prefetch aggressiveness based on access pattern
+	var numChunks int64
+	if sequentialCount >= 5 {
+		// Heavy sequential access - prefetch more aggressively
+		numChunks = 4 // 32MB with 8MB chunks
+	} else if sequentialCount >= 3 {
+		// Moderate sequential access
+		numChunks = 2 // 16MB
+	} else {
+		// Light prefetch
+		numChunks = 1 // 8MB
+	}
+
+	// Limit based on configured read ahead
 	if f.readAhead > 0 {
-		numChunks = (f.readAhead + f.chunkSize - 1) / f.chunkSize
-		if numChunks < 2 {
-			numChunks = 2 // Minimum 2 chunks for smooth playback
-		}
-		if numChunks > 3 {
-			numChunks = 3 // Maximum 3 chunks to prevent memory usage
+		maxChunks := (f.readAhead + f.chunkSize - 1) / f.chunkSize
+		if numChunks > maxChunks {
+			numChunks = maxChunks
 		}
 	}
 
@@ -640,13 +759,18 @@ func (f *File) aggressiveSequentialPrefetch(ctx context.Context, currentOffset i
 		endChunk = totalChunks
 	}
 
-	// Download chunks concurrently (but only 2-3 instead of 6)
+	// Download chunks with limited concurrency to prevent memory explosion
+	semaphore := make(chan struct{}, 2) // Max 2 concurrent downloads
+
 	for chunkIdx := startChunk; chunkIdx < endChunk; chunkIdx++ {
 		select {
 		case <-f.closeChan:
 			return
-		default:
-			go f.downloadChunkAsync(ctx, chunkIdx)
+		case semaphore <- struct{}{}:
+			go func(idx int64) {
+				defer func() { <-semaphore }()
+				f.downloadChunkAsync(ctx, idx)
+			}(chunkIdx)
 		}
 	}
 }
@@ -679,13 +803,6 @@ func (f *File) downloadChunkAsync(ctx context.Context, chunkIdx int64) {
 
 // downloadChunk downloads a specific chunk (blocking) using fixed chunk size
 func (f *File) downloadChunk(ctx context.Context, chunkIdx int64) error {
-	return f.downloadChunkWithThreshold(ctx, chunkIdx, 0) // No early return
-}
-
-// downloadChunkWithThreshold downloads a chunk with optional early return
-// If minThreshold > 0, returns as soon as that many bytes are available
-// Background download continues to completion
-func (f *File) downloadChunkWithThreshold(ctx context.Context, chunkIdx int64, minThreshold int64) error {
 	chunkStart := chunkIdx * f.chunkSize
 	chunkEnd := chunkStart + f.chunkSize
 	if chunkEnd > f.info.Size() {
@@ -693,50 +810,8 @@ func (f *File) downloadChunkWithThreshold(ctx context.Context, chunkIdx int64, m
 	}
 	actualSize := chunkEnd - chunkStart
 
-	// Check if already cached (zero-allocation check)
-	if f.IsCached(chunkStart, actualSize) {
-		return nil // Already cached
-	}
-
-	// If threshold requested, check if we have at least that much cached
-	if minThreshold > 0 {
-		// Check partial cache
-		missing := f.FindMissing(chunkStart, actualSize)
-		if len(missing) == 0 {
-			return nil // Fully cached
-		}
-
-		// Calculate how much we already have
-		cachedBytes := actualSize
-		for _, m := range missing {
-			cachedBytes -= m.Size
-		}
-
-		if cachedBytes >= minThreshold {
-			// We already have enough cached data
-			// Start background download for the rest if not already downloading
-			if _, exists := f.downloading.Load(chunkIdx); !exists {
-				go func() {
-					_ = f.downloadChunk(ctx, chunkIdx)
-				}()
-			}
-			return nil
-		}
-	}
-
 	// Check if already downloading - if so, wait for it
 	if job, exists := f.downloading.Load(chunkIdx); exists {
-		// If threshold specified, wait for threshold, otherwise wait for completion
-		if minThreshold > 0 && job.thresholdReady != nil {
-			select {
-			case <-job.thresholdReady:
-				return nil // Threshold reached, return early
-			case err := <-job.done:
-				return err // Download completed or failed
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
 		return <-job.done // Wait for existing download to complete
 	}
 
@@ -745,30 +820,19 @@ func (f *File) downloadChunkWithThreshold(ctx context.Context, chunkIdx int64, m
 		chunkStart:     chunkStart,
 		chunkSize:      actualSize,
 		done:           make(chan error, 1),
-		minThreshold:   minThreshold,
+		minThreshold:   0,
 		thresholdReady: make(chan struct{}),
 	}
 
 	// Try to store job (race condition safe)
 	actual, loaded := f.downloading.LoadOrStore(chunkIdx, job)
 	if loaded {
-		// Someone else started downloading
-		if minThreshold > 0 && actual.thresholdReady != nil {
-			select {
-			case <-actual.thresholdReady:
-				return nil // Threshold reached
-			case err := <-actual.done:
-				return err // Download completed or failed
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
 		return <-actual.done
 	}
 
 	// Start background download
 	go func() {
-		err := f.doDownloadProgressive(ctx, job)
+		err := f.doDownloadWithJob(ctx, job)
 		job.mu.Lock()
 		job.completed = true
 		job.mu.Unlock()
@@ -782,40 +846,43 @@ func (f *File) downloadChunkWithThreshold(ctx context.Context, chunkIdx int64, m
 			f.bytesDownloaded.Add(actualSize)
 		}
 	}()
+	// No threshold, wait for completion
+	return <-job.done
+}
 
-	// Wait for threshold or completion
-	if minThreshold > 0 {
+// doDownloadWithJob performs the actual HTTP download with optional progressive signaling
+func (f *File) doDownloadWithJob(ctx context.Context, job *downloadJob) error {
+	offset := job.chunkStart
+	size := job.chunkSize
+	end := offset + size - 1
+
+	// Implement retry logic for robustness
+	var rc io.ReadCloser
+	var err error
+
+	for retries := 0; retries < 3; retries++ {
+		rc, err = f.manager.StreamReader(ctx, f.info.Parent(), f.info.Name(), offset, end)
+		if err == nil {
+			break
+		}
+
+		// Brief delay before retry
 		select {
-		case <-job.thresholdReady:
-			return nil // Threshold reached, return early
-		case err := <-job.done:
-			return err // Download completed or failed before threshold
+		case <-time.After(time.Duration(retries+1) * 100 * time.Millisecond):
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	}
 
-	// No threshold, wait for completion
-	return <-job.done
-}
-
-// doDownloadProgressive performs progressive download with threshold signaling
-func (f *File) doDownloadProgressive(ctx context.Context, job *downloadJob) error {
-	return f.doDownloadWithJob(ctx, job.chunkStart, job.chunkSize, job)
-}
-
-// doDownloadWithJob performs the actual HTTP download with optional progressive signaling
-func (f *File) doDownloadWithJob(ctx context.Context, offset, size int64, job *downloadJob) error {
-	end := offset + size - 1
-	rc, err := f.manager.StreamReader(ctx, f.info.Parent(), f.info.Name(), offset, end)
 	if err != nil {
-		return fmt.Errorf("get download link: %w", err)
+		return fmt.Errorf("get download link after retries: %w", err)
 	}
+
 	defer func(rc io.ReadCloser) {
 		_ = rc.Close()
 	}(rc)
 
-	// Get buffer from pool (128KB)
+	// GetReader buffer from pool (128KB)
 	bufPtr := downloadBufferPool.Get().(*[]byte)
 	buffer := *bufPtr
 	defer downloadBufferPool.Put(bufPtr)
@@ -905,11 +972,72 @@ func (f *File) CloseDownloads() error {
 // Stats returns download statistics
 func (f *File) Stats() map[string]interface{} {
 	return map[string]interface{}{
-		"bytes_downloaded": f.bytesDownloaded.Load(),
-		"active_downloads": f.downloading.Size(),
-		"chunk_size":       f.chunkSize,
-		"read_ahead":       f.readAhead,
-		"cached_size":      f.GetCachedSize(),
-		"total_size":       f.info.Size(),
+		"bytes_downloaded":  f.bytesDownloaded.Load(),
+		"active_downloads":  f.downloading.Size(),
+		"chunk_size":        f.chunkSize,
+		"read_ahead":        f.readAhead,
+		"cached_size":       f.GetCachedSize(),
+		"total_size":        f.info.Size(),
+		"sequential_reads":  f.playbackState.sequentialReads.Load(),
+		"playback_active":   f.playbackState.playbackActive.Load(),
+		"has_active_stream": f.playbackState.activeStreamReader.Load() != nil,
 	}
+}
+
+// streamingReadAt performs a streaming read using the ring buffer
+// This is optimized for sequential playback with instant startup
+// IMPORTANT: Only reads what's requested, does NOT download entire file
+func (f *File) streamingReadAt(ctx context.Context, p []byte, offset int64) (int, error) {
+	// Calculate read size
+	readSize := int64(len(p))
+	if offset+readSize > f.info.Size() {
+		readSize = f.info.Size() - offset
+	}
+
+	// Create streaming reader - will only download what we need
+	endOffset := offset + readSize - 1
+	sr := NewStreamingReader(ctx, f.manager, f.info, offset, endOffset, f)
+	defer func() {
+		// Close immediately to stop background downloading
+		_ = sr.Close()
+	}()
+
+	// Read all data from stream (ONLY the requested amount)
+	totalRead := 0
+	for totalRead < len(p) {
+		n, err := sr.Read(p[totalRead:])
+		totalRead += n
+
+		if err != nil {
+			if err == io.EOF {
+				// EOF is expected when we've read all available data
+				if totalRead > 0 {
+					return totalRead, nil
+				}
+				return 0, io.EOF
+			}
+			// Return actual error with any data read so far
+			if totalRead > 0 {
+				return totalRead, nil
+			}
+			return 0, err
+		}
+
+		// Check if we've read enough
+		if totalRead >= len(p) || totalRead >= int(readSize) {
+			// Got what we needed - return immediately
+			// Close will stop background download
+			break
+		}
+
+		// Check context cancellation
+		if ctx.Err() != nil {
+			if totalRead > 0 {
+				return totalRead, nil
+			}
+			return 0, ctx.Err()
+		}
+	}
+
+	return totalRead, nil
 }

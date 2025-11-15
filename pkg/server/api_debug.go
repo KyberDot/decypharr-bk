@@ -43,7 +43,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	var memStats runtime.MemStats
 	runtime.ReadMemStats(&memStats)
 
-	// Get uptime from manager
+	// GetReader uptime from manager
 	uptime := s.manager.Uptime()
 	startTime := s.manager.StartTime()
 
@@ -71,7 +71,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		"start_time":     startTime.Format("2006-01-02 15:04:05"),
 	}
 
-	// Get debrid stats from manager
+	// GetReader debrid stats from manager
 	debridStats := make([]debridTypes.Stats, 0)
 	torrentsCounts, err := s.manager.GetTorrentsCount()
 	if err != nil {
@@ -96,7 +96,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		profile.Name = debridName
 		debridStat.Profile = profile
 
-		// Get torrent data from manager
+		// GetReader torrent data from manager
 
 		if err == nil {
 			libraryStat.Total = torrentsCounts

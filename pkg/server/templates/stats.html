@@ -230,31 +230,6 @@
                         <div class="stat-desc">Currently cached</div>
                     </div>
                 `;
-
-                // Memory buffer stats if available
-                if (stats.memory_buffer) {
-                    const memBuf = stats.memory_buffer;
-                    const memUsage = memBuf.memory_limit > 0 ?
-                        ((memBuf.memory_used / memBuf.memory_limit) * 100).toFixed(1) : 0;
-
-                    html += `
-                        <div class="stat">
-                            <div class="stat-title">Memory Buffer Hit Rate</div>
-                            <div class="stat-value text-success">${memBuf.hit_rate_pct ? memBuf.hit_rate_pct.toFixed(1) : '0.0'}%</div>
-                            <div class="stat-desc">Hits: ${formatNumber(memBuf.hits || 0)} / Misses: ${formatNumber(memBuf.misses || 0)}</div>
-                        </div>
-                        <div class="stat">
-                            <div class="stat-title">Memory Buffer Usage</div>
-                            <div class="stat-value text-info">${window.decypharrUtils.formatBytes(memBuf.memory_used || 0)}</div>
-                            <div class="stat-desc">Limit: ${window.decypharrUtils.formatBytes(memBuf.memory_limit || 0)} (${memUsage}%)</div>
-                        </div>
-                        <div class="stat">
-                            <div class="stat-title">Memory Chunks</div>
-                            <div class="stat-value text-accent">${formatNumber(memBuf.chunks_count || 0)}</div>
-                            <div class="stat-desc">Files: ${formatNumber(memBuf.files_count || 0)} | Evictions: ${formatNumber(memBuf.evictions || 0)}</div>
-                        </div>
-                    `;
-                }
             }
 
             html += '</div>';

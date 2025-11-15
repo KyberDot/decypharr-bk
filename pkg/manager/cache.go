@@ -6,6 +6,8 @@ import (
 	"github.com/puzpuzpuz/xsync/v4"
 )
 
+const torrentEntryCachePrefix = "torrent::"
+
 func (m *Manager) initEntryCache() {
 	m.entry = NewEntryCache(m)
 }
@@ -13,6 +15,7 @@ func (m *Manager) initEntryCache() {
 type EntryCacheItem struct {
 	current  *FileInfo
 	children []FileInfo
+	refresh  bool
 }
 
 type EntryCache struct {
@@ -35,14 +38,10 @@ func (e *EntryCache) Get(name string) (*FileInfo, []FileInfo) {
 	return item.current, item.children
 }
 
-func (e *EntryCache) Invalidate(name string) {
-	e.refreshEntry(name)
-}
-
 func (e *EntryCache) refreshEntry(name string) EntryCacheItem {
-	if strings.HasPrefix(name, "torrent::") {
+	if strings.HasPrefix(name, torrentEntryCachePrefix) {
 		// This is a torrent folder
-		torrentName := strings.TrimPrefix(name, "torrent::")
+		torrentName := strings.TrimPrefix(name, torrentEntryCachePrefix)
 		current, children := e.manager.getTorrentChildren(torrentName)
 		item := EntryCacheItem{
 			current:  current,

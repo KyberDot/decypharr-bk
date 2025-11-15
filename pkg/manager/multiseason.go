@@ -76,7 +76,7 @@ func convertToMultiSeason(torrent *storage.Torrent, seasons []SeasonInfo) []*sto
 				Deleted:   file.Deleted,
 				IsRar:     file.IsRar,
 				InfoHash:  file.InfoHash,
-				Debrid:    file.Debrid,
+				AddedOn:   torrent.AddedOn,
 			}
 			size += file.Size
 		}
@@ -91,7 +91,6 @@ func convertToMultiSeason(torrent *storage.Torrent, seasons []SeasonInfo) []*sto
 			Magnet:           torrent.Magnet,
 			Category:         torrent.Category,
 			SavePath:         torrent.SavePath,
-			Folder:           torrent.Folder,
 			Status:           debridTypes.TorrentStatusDownloading,
 			ActiveDebrid:     torrent.ActiveDebrid,
 			Action:           torrent.Action,

@@ -72,7 +72,7 @@ func (m *Migrator) Start() error {
 	m.ctx = ctx
 	m.cancelFunc = cancel
 
-	go m.runMigration(ctx, cachedTorrents)
+	m.runMigration(ctx, cachedTorrents)
 
 	return nil
 }
@@ -164,7 +164,6 @@ func (m *Migrator) runMigration(ctx context.Context, cachedTorrents map[string][
 		}
 
 		if exists {
-			m.logger.Debug().Str("infohash", infohash).Msg("Torrent already migrated, skipping")
 			status.Completed++
 			status.UpdatedAt = time.Now()
 			_ = m.storage.SaveMigrationStatus(status)
@@ -301,8 +300,7 @@ func (m *Migrator) mergeCachedTorrents(cachedList []*storage.CachedTorrent) (*st
 		other := cachedList[i]
 
 		// Check if placement already exists for this debrid+infohash combo
-		placementKey := storage.GetPlacementKey(other.Debrid, other.InfoHash)
-		if _, exists := managed.Placements[placementKey]; exists {
+		if _, exists := managed.Placements[other.Debrid]; exists {
 			continue
 		}
 
@@ -336,7 +334,7 @@ func (m *Migrator) mergeCachedTorrents(cachedList []*storage.CachedTorrent) (*st
 			placement.DownloadedAt = &downloadedAt
 		}
 
-		managed.Placements[placementKey] = placement
+		managed.Placements[other.Debrid] = placement
 
 		// Merge files - add any files not in the base and populate placement files
 		if other.Files != nil {
@@ -349,7 +347,7 @@ func (m *Migrator) mergeCachedTorrents(cachedList []*storage.CachedTorrent) (*st
 						ByteRange: file.ByteRange,
 						Deleted:   file.Deleted,
 						InfoHash:  other.InfoHash, // Track which torrent this file came from
-						Debrid:    other.Debrid,   // Track which debrid has this file
+						AddedOn:   addedAt,
 					}
 				}
 

@@ -12,7 +12,7 @@ import (
 
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/sirrobot01/decypharr/pkg/manager"
-	"github.com/sirrobot01/decypharr/pkg/mount/dfs/config"
+	"github.com/sirrobot01/decypharr/pkg/mount/dfs/common"
 )
 
 // StatsTracker is a lightweight struct for tracking VFS statistics
@@ -88,7 +88,7 @@ type FileAccessInfo struct {
 
 // Manager manages files for all remote files
 type Manager struct {
-	config      *config.FuseConfig
+	config      *common.FuseConfig
 	files       *xsync.Map[string, *File]
 	closeCtx    context.Context
 	closeCancel context.CancelFunc
@@ -107,7 +107,7 @@ type Manager struct {
 }
 
 // NewManager creates a file manager
-func NewManager(manager *manager.Manager, fuseConfig *config.FuseConfig) *Manager {
+func NewManager(manager *manager.Manager, fuseConfig *common.FuseConfig) *Manager {
 	// Create stats tracker
 	statsTracker := &StatsTracker{}
 
@@ -361,7 +361,7 @@ func (m *Manager) scanCacheDirectory() (int64, []cachedFileInfo, error) {
 		}
 		seenFiles[path] = true
 
-		// Get actual disk usage (accounts for sparse files)
+		// GetReader actual disk usage (accounts for sparse files)
 		fileSize, err := m.getActualDiskUsage(path, info)
 		if err != nil {
 			// Fallback to logical size
@@ -374,7 +374,7 @@ func (m *Manager) scanCacheDirectory() (int64, []cachedFileInfo, error) {
 			cacheKey = "" // Will skip removal if can't calculate key
 		}
 
-		// Get access time - prefer from in-memory tracking
+		// GetReader access time - prefer from in-memory tracking
 		accessTime := m.getFileAccessTime(cacheKey, info)
 
 		totalSize += fileSize
@@ -398,7 +398,7 @@ func (m *Manager) scanCacheDirectory() (int64, []cachedFileInfo, error) {
 
 // getActualDiskUsage returns the actual disk space used by a file (accounting for sparse files)
 func (m *Manager) getActualDiskUsage(path string, info os.FileInfo) (int64, error) {
-	// Get the underlying syscall.Stat_t structure
+	// GetReader the underlying syscall.Stat_t structure
 	sys := info.Sys()
 	if sys == nil {
 		return info.Size(), nil

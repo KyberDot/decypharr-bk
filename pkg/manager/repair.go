@@ -14,8 +14,8 @@ import (
 // GetBrokenFiles checks if files in a torrent are broken and attempts to fix them
 // Returns the list of broken files, or empty if successfully repaired
 // This implementation aligns with cache.GetBrokenFiles behavior
-func (m *Manager) GetBrokenFiles(torrent *storage.Torrent, filenames []string) []string {
-	if torrent.ActiveDebrid == "" {
+func (m *Manager) GetBrokenFiles(entry *storage.TorrentEntry, filenames []string) []string {
+	if len(entry.Files) == 0 {
 		return filenames
 	}
 
@@ -26,25 +26,25 @@ func (m *Manager) GetBrokenFiles(torrent *storage.Torrent, filenames []string) [
 	files := make(map[string]*storage.File)
 	if len(filenames) > 0 {
 		for _, name := range filenames {
-			if f, ok := torrent.Files[name]; ok {
+			if f, ok := entry.Files[name]; ok {
 				files[name] = f
 			}
 		}
 	} else {
-		files = torrent.Files
+		files = entry.Files
 	}
 
-	// First pass: check for missing links and refresh if needed
-	placement := torrent.GetActivePlacement(torrent.InfoHash)
-	if placement == nil {
-		return filenames
-	}
-
-	// Get the debrid client for link checking
-	client := m.DebridClient(torrent.ActiveDebrid)
-	if client == nil {
-		m.logger.Error().Str("debrid", torrent.ActiveDebrid).Msg("Debrid client not found")
-		return filenames
+	torrents := make(map[string]*storage.Torrent)
+	badTorrents := make(map[string]*storage.Torrent)
+	for _, file := range files {
+		if _, ok := torrents[file.InfoHash]; !ok {
+			torrent, err := m.storage.Get(file.InfoHash)
+			if err != nil {
+				m.logger.Error().Err(err).Str("infohash", file.InfoHash).Msg("Failed to get torrent from storage")
+				continue
+			}
+			torrents[file.InfoHash] = torrent
+		}
 	}
 
 	// Second pass: check links validity in parallel
@@ -67,6 +67,17 @@ func (m *Manager) GetBrokenFiles(torrent *storage.Torrent, filenames []string) [
 				return
 			default:
 			}
+			torrent, ok := torrents[file.InfoHash]
+			if !ok {
+				return
+			}
+			// GetReader the debrid client for link checking
+			client := m.DebridClient(torrent.ActiveDebrid)
+			if client == nil {
+				m.logger.Error().Str("debrid", torrent.ActiveDebrid).Msg("Debrid client not found")
+				return
+			}
+			placement := torrent.GetActivePlacement()
 
 			placementFile := placement.Files[name]
 			if placementFile == nil || (placementFile.Link == "" && placementFile.Id == "") {
@@ -79,6 +90,7 @@ func (m *Manager) GetBrokenFiles(torrent *storage.Torrent, filenames []string) [
 				} else {
 					// per_file strategy - only mark this file as broken
 					brokenFiles = append(brokenFiles, name)
+					badTorrents[torrent.InfoHash] = torrent
 				}
 				mu.Unlock()
 				return
@@ -102,6 +114,7 @@ func (m *Manager) GetBrokenFiles(torrent *storage.Torrent, filenames []string) [
 						} else {
 							// per_file strategy - only mark this file as broken
 							brokenFiles = append(brokenFiles, name)
+							badTorrents[torrent.InfoHash] = torrent
 						}
 						mu.Unlock()
 					}
@@ -117,6 +130,7 @@ func (m *Manager) GetBrokenFiles(torrent *storage.Torrent, filenames []string) [
 		// Mark all files as broken for per_torrent strategy
 		for name := range files {
 			brokenFiles = append(brokenFiles, name)
+			badTorrents = torrents
 		}
 	}
 	// For per_file strategy, brokenFiles already contains only the broken ones
@@ -124,22 +138,26 @@ func (m *Manager) GetBrokenFiles(torrent *storage.Torrent, filenames []string) [
 	// Try to fix the torrent if broken files were found
 	if len(brokenFiles) > 0 {
 		m.logger.Info().
-			Str("infohash", torrent.InfoHash).
 			Int("broken_files", len(brokenFiles)).
 			Msg("Detected broken files, attempting to fix torrent")
 
 		// Use Fixer to repair the torrent
-		result, err := m.fixer.FixTorrent(m.ctx, torrent, false)
-		if err != nil || !result.Success {
-			m.logger.Error().
-				Err(err).
-				Str("infohash", torrent.InfoHash).
-				Msg("Failed to fix torrent")
-			return brokenFiles
-		} else {
-			// Refresh torrent after successful fix
+		fixed := 0
+		for _, torrent := range badTorrents {
+			result, err := m.fixer.FixTorrent(m.ctx, torrent, false)
+			if err != nil || !result.Success {
+				m.logger.Error().
+					Err(err).
+					Msg("Failed to fix torrent")
+				return brokenFiles
+			}
+			fixed++
+		}
+		if fixed == len(badTorrents) {
+			// All bad torrents fixed
 			return []string{}
 		}
+
 	}
 
 	// No broken files
@@ -158,25 +176,5 @@ func (m *Manager) MoveTorrent(ctx context.Context, torrent *storage.Torrent) err
 		return fmt.Errorf("moving failed after %d attempts: %w", result.AttemptsCount, result.Error)
 	}
 
-	m.logger.Info().
-		Str("name", torrent.Name).
-		Str("new_debrid", result.NewDebrid).
-		Msg("Torrent moved successfully")
-
 	return nil
-}
-
-// IsFailedToReinsert checks if a torrent has been marked as failed to re-insert
-func (m *Manager) IsFailedToReinsert(infohash string) bool {
-	if m.fixer == nil {
-		return false
-	}
-	return m.fixer.IsFailedToReinsert(infohash)
-}
-
-// ResetRepairState manually resets the repair failure state for a torrent
-func (m *Manager) ResetRepairState(infohash string) {
-	if m.fixer != nil {
-		m.fixer.ResetFailureState(infohash)
-	}
 }

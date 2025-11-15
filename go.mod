@@ -20,9 +20,8 @@ require (
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 	go.etcd.io/bbolt v1.4.3
 	go.uber.org/ratelimit v0.3.1
-	golang.org/x/crypto v0.39.0
-	golang.org/x/net v0.41.0
-	golang.org/x/sync v0.16.0
+	golang.org/x/crypto v0.42.0
+	golang.org/x/sync v0.17.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
 
@@ -50,8 +49,9 @@ require (
 	github.com/stretchr/testify v1.11.1 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	go.uber.org/mock v0.5.2 // indirect
-	golang.org/x/mod v0.25.0 // indirect
+	golang.org/x/mod v0.27.0 // indirect
+	golang.org/x/net v0.43.0 // indirect
 	golang.org/x/sys v0.38.0 // indirect
-	golang.org/x/text v0.26.0 // indirect
-	golang.org/x/tools v0.34.0 // indirect
+	golang.org/x/text v0.29.0 // indirect
+	golang.org/x/tools v0.36.0 // indirect
 )

@@ -5,10 +5,12 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/logger"
 	"github.com/sirrobot01/decypharr/internal/utils"
+	httppool "github.com/sirrobot01/decypharr/pkg/http"
 	"github.com/sirrobot01/decypharr/pkg/manager"
 )
 
@@ -29,12 +31,14 @@ const (
 type Handler struct {
 	logger  zerolog.Logger
 	manager *manager.Manager
+	pools   *xsync.Map[string, *httppool.Pool]
 }
 
 func NewHandler(mgr *manager.Manager) *Handler {
 	h := &Handler{
 		logger:  logger.New("webdav"),
 		manager: mgr,
+		pools:   xsync.NewMap[string, *httppool.Pool](),
 	}
 	return h
 }

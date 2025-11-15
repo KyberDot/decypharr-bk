@@ -142,7 +142,7 @@ func (r *Repair) reset(j *storage.Job) {
 	j.BrokenItems = nil
 	j.Error = ""
 	if j.Recurrent || j.Arrs == nil {
-		j.Arrs = r.getArrs([]string{}) // Get new arrs
+		j.Arrs = r.getArrs([]string{}) // GetReader new arrs
 	}
 }
 
@@ -480,7 +480,7 @@ func (r *Repair) checkMountUp(media []arr.Content) error {
 			r.logger.Debug().Msgf("File %s does not exist, skipping repair", file.Path)
 			return fmt.Errorf("file %s does not exist, skipping repair", file.Path)
 		}
-		// Get the symlink target
+		// GetReader the symlink target
 		symlinkPath := getSymlinkTarget(file.Path)
 		if symlinkPath != "" {
 			r.logger.Trace().Msgf("Found symlink target for %s: %s", file.Path, symlinkPath)
@@ -499,7 +499,7 @@ func (r *Repair) getBrokenFiles(ctx context.Context, media arr.Content) []arr.Co
 		return nil
 	}
 
-	// Get debrid clients from somewhere - this might need to be passed in or obtained from a global registry
+	// GetReader debrid clients from somewhere - this might need to be passed in or obtained from a global registry
 	// For now, we'll use an empty map and the function will skip files it can't find
 	clients := make(map[string]common.Client)
 

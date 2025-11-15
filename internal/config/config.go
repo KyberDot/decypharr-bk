@@ -203,6 +203,15 @@ type DFS struct {
 
 	// Smart caching
 	SmartCaching bool `json:"smart_caching,omitempty"` // Enable smart prefetching for episodes
+
+	// Memory-only mode (no disk caching)
+	MemoryOnlyMode   bool   `json:"memory_only_mode,omitempty"`   // Enable pure memory streaming (no disk cache)
+	MemoryLimit      string `json:"memory_limit,omitempty"`       // Per-file memory limit (e.g., 100MB)
+	MemoryChunkSize  string `json:"memory_chunk_size,omitempty"`  // Memory chunk size (e.g., 2MB)
+	MemoryBufferSize string `json:"memory_buffer_size,omitempty"` // Ring buffer size (e.g., 8MB)
+
+	// V2 Architecture (rclone-style persistent connections and unified buffering)
+	UseV2Architecture bool `json:"use_v2_architecture,omitempty"` // Enable V2 architecture with ChunkedReader (RECOMMENDED for production)
 }
 
 type ExternalRclone struct {
@@ -794,6 +803,10 @@ func (c *Config) setDefaults() {
 	// Migrate deprecated fields to Manager (backward compatibility)
 	c.migrateQBitTorrentToManager()
 
+	if c.DefaultDownloadAction == "" {
+		c.DefaultDownloadAction = DownloadActionSymlink
+	}
+
 	for i, debrid := range c.Debrids {
 		c.Debrids[i] = c.updateDebrid(debrid)
 	}
@@ -815,7 +828,7 @@ func (c *Config) setDefaults() {
 		// Set MountPath from debridConfig.Folder by splliting it
 		// debrid.Folder is usually {mount_path}/{debrid_name}/__all__ or {mount_path}/{debrid_name}/torrents
 		if len(c.Debrids) > 0 {
-			c.Mount.MountPath = filepath.Dir(filepath.Dir(firstDebrid.Folder)) // Get parent of parent directory
+			c.Mount.MountPath = filepath.Dir(filepath.Dir(firstDebrid.Folder)) // GetReader parent of parent directory
 		}
 	}
 

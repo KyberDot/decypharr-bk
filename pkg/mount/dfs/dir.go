@@ -10,8 +10,8 @@ import (
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/pkg/manager"
-	"github.com/sirrobot01/decypharr/pkg/mount/dfs/config"
-	"github.com/sirrobot01/decypharr/pkg/mount/dfs/vfs"
+	"github.com/sirrobot01/decypharr/pkg/mount/dfs/common"
+	"github.com/sirrobot01/decypharr/pkg/mount/dfs/rfs"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -23,14 +23,14 @@ const (
 	LevelFile
 )
 
-// Dir implements a FUSE directory with sparse file caching
+// Dir implements a FUSE directory with RFS streaming
 type Dir struct {
 	fs.Inode
-	vfs           *vfs.Manager
+	rfs           *rfs.Manager
 	level         DirLevel
 	name          string
 	children      *xsync.Map[string, *ChildEntry] // key is the child name
-	config        *config.FuseConfig
+	config        *common.FuseConfig
 	logger        zerolog.Logger
 	populated     atomic.Bool
 	modTime       uint64
@@ -49,9 +49,9 @@ var _ = (fs.NodeGetattrer)((*Dir)(nil))
 var _ = (fs.NodeUnlinker)((*Dir)(nil))
 
 // NewDir creates a new directory
-func NewDir(vfsCache *vfs.Manager, manager *manager.Manager, name string, level DirLevel, modTime uint64, config *config.FuseConfig, logger zerolog.Logger) *Dir {
+func NewDir(rfsManager *rfs.Manager, manager *manager.Manager, name string, level DirLevel, modTime uint64, config *common.FuseConfig, logger zerolog.Logger) *Dir {
 	return &Dir{
-		vfs:      vfsCache,
+		rfs:      rfsManager,
 		name:     name,
 		children: xsync.NewMap[string, *ChildEntry](),
 		level:    level,
@@ -96,8 +96,7 @@ func (d *Dir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.
 		return d.returnExistingChild(ctx, name, child, out)
 
 	case LevelFile:
-		// For file level, ONLY load the specific requested file
-		// Don't load all files in the torrent
+		// For file level, only load the specific file
 		return d.loadSingleFile(ctx, name, out)
 
 	default:
@@ -110,7 +109,7 @@ func (d *Dir) returnExistingChild(ctx context.Context, name string, child *Child
 	if child.node == nil {
 		if child.attr.Mode&fuse.S_IFDIR != 0 {
 			// It's a directory - create the Dir node
-			child.node = NewDir(d.vfs, d.manager, name, d.level+1, d.modTime, d.config, d.logger)
+			child.node = NewDir(d.rfs, d.manager, name, d.level+1, d.modTime, d.config, d.logger)
 		} else {
 			// It's a file - shouldn't happen as files are always created fully
 			return nil, syscall.ENOENT
@@ -146,7 +145,7 @@ func (d *Dir) returnExistingChild(ctx context.Context, name string, child *Child
 
 // loadSingleFile loads only one specific file without populating all children
 func (d *Dir) loadSingleFile(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	// Get torrent from source
+	// GetReader torrent from source
 	info, err := d.manager.GetTorrentFile(d.name, name)
 	if err != nil {
 		return nil, syscall.EIO
@@ -197,7 +196,7 @@ func (d *Dir) Unlink(ctx context.Context, name string) syscall.Errno {
 	// Handle different types of deletions based on directory level and file type
 	switch d.level {
 	case LevelFile:
-		// Get torrent name from node
+		// GetReader torrent name from node
 		node := child.node
 		fileNode, ok := node.(*File)
 		if !ok {
@@ -208,9 +207,8 @@ func (d *Dir) Unlink(ctx context.Context, name string) syscall.Errno {
 			d.logger.Error().Err(err).Str("file", fileNode.info.Name()).Msg("Failed to remove file from source")
 			return syscall.EIO
 		}
-		// Close the file from range_manager
-		cacheKey := vfs.BuildCacheKey(fileNode.info.Parent(), fileNode.info.Name())
-		_ = d.vfs.CloseFile(cacheKey)
+		// Close the reader from RFS manager
+		_ = d.rfs.CloseReader(fileNode.info.Parent(), fileNode.info.Name())
 	default:
 		return syscall.EPERM
 	}
@@ -232,7 +230,7 @@ func (d *Dir) RmDir(ctx context.Context, name string) syscall.Errno {
 	// Handle different types of deletions based on directory level and file type
 	switch d.level {
 	case LevelTorrent:
-		// Get torrent name from node
+		// GetReader torrent name from node
 		node := child.node
 		torrentDir, ok := node.(*Dir)
 		if !ok {
@@ -321,7 +319,7 @@ func (d *Dir) populateTorrents(ctx context.Context) {
 }
 
 func (d *Dir) populateTorrent(ctx context.Context) {
-	// Get files for this torrent from source
+	// GetReader files for this torrent from source
 	current, children := d.manager.GetTorrentChildren(d.name)
 	if current == nil || children == nil {
 		return
@@ -335,7 +333,7 @@ func (d *Dir) populateTorrent(ctx context.Context) {
 
 func (d *Dir) addContentFile(entry manager.FileInfo) {
 	fileNode := newFile(
-		d.vfs,
+		d.rfs,
 		d.config,
 		&entry,
 		d.logger,
@@ -353,7 +351,7 @@ func (d *Dir) addContentFile(entry manager.FileInfo) {
 }
 
 func (d *Dir) addDirectory(entry *manager.FileInfo) {
-	dirNode := NewDir(d.vfs, d.manager, entry.Name(), d.level+1, uint64(entry.ModTime().Unix()), d.config, d.logger)
+	dirNode := NewDir(d.rfs, d.manager, entry.Name(), d.level+1, uint64(entry.ModTime().Unix()), d.config, d.logger)
 
 	// Hash full path to ensure unique inodes
 	fullPath := d.name + "/" + entry.Name()
@@ -371,7 +369,7 @@ func (d *Dir) addDirectory(entry *manager.FileInfo) {
 
 func (d *Dir) addFile(entry *manager.FileInfo) {
 
-	fileNode := newFile(d.vfs, d.config, entry, d.logger)
+	fileNode := newFile(d.rfs, d.config, entry, d.logger)
 
 	// Hash full path to ensure unique inodes
 	fullPath := d.name + "/" + entry.Name()

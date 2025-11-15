@@ -43,9 +43,7 @@ func (m *Mount) performMount() error {
 	// Create mount directory if not on windows
 
 	if runtime.GOOS != "windows" {
-		if err := os.MkdirAll(m.MountPath, 0755); err != nil {
-			return fmt.Errorf("failed to create mount directory %s: %w", m.MountPath, err)
-		}
+		_ = os.MkdirAll(m.MountPath, 0755)
 	}
 
 	// Check if already mounted

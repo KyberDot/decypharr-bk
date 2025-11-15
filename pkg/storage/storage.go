@@ -15,7 +15,7 @@ const (
 	// Bucket names
 	queuedBucket       = "queued"
 	cachedBucket       = "cached"
-	nameIndexBucket    = "name_index"
+	nameEntryBucket    = "name_entry"
 	metaBucket         = "meta"
 	repairBucket       = "repair_jobs"
 	repairUniqueBucket = "repair_unique"
@@ -55,7 +55,7 @@ func NewStorage(dbPath string) (*Storage, error) {
 
 	// Create buckets if they don't exist
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, bucket := range []string{queuedBucket, cachedBucket, nameIndexBucket, metaBucket, repairBucket, repairUniqueBucket} {
+		for _, bucket := range []string{queuedBucket, cachedBucket, nameEntryBucket, metaBucket, repairBucket, repairUniqueBucket} {
 			_, err := tx.CreateBucketIfNotExists([]byte(bucket))
 			if err != nil {
 				return fmt.Errorf("failed to create bucket %s: %w", bucket, err)
@@ -96,7 +96,7 @@ func (s *Storage) Stats() map[string]interface{} {
 		stats["total_size"] = fileSize
 		stats["page_count"] = tx.Size()
 
-		// Get database-level stats
+		// GetReader database-level stats
 		dbStats := s.db.Stats()
 		stats["tx_count"] = dbStats.TxN
 		stats["open_tx_count"] = dbStats.OpenTxN

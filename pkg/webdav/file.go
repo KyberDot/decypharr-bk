@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sync"
 
+	httppool "github.com/sirrobot01/decypharr/pkg/http"
 	"github.com/sirrobot01/decypharr/pkg/manager"
 )
 
@@ -34,10 +35,25 @@ func getDownloadByteRange(info *manager.FileInfo) *[2]int64 {
 	return info.ByteRange()
 }
 
+func (h *Handler) getOrCreatePool(torrentName, filename string) *httppool.Pool {
+	poolKey := fmt.Sprintf("%s|%s", torrentName, filename)
+	if pool, exists := h.pools.Load(poolKey); exists {
+		return pool
+	}
+	newPool := httppool.NewPool(h.manager, torrentName, filename)
+	h.pools.Store(poolKey, newPool)
+	return newPool
+}
+
 func (h *Handler) StreamResponse(info *manager.FileInfo, w http.ResponseWriter, r *http.Request) error {
 	start, end := h.getRange(info, r)
 
-	resp, err := h.manager.Stream(r.Context(), info.Parent(), info.Name(), start, end)
+	pool := h.getOrCreatePool(info.Parent(), info.Name())
+	if pool == nil {
+		return &streamError{Err: errors.New("failed to get HTTP pool"), StatusCode: http.StatusInternalServerError}
+	}
+
+	resp, err := pool.Get(r.Context(), start, end)
 	if err != nil {
 		return &streamError{Err: err, StatusCode: http.StatusRequestedRangeNotSatisfiable}
 	}

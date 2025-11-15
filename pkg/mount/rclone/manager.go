@@ -303,7 +303,6 @@ func (m *Manager) waitForServer() {
 		}
 
 		if err := m.client.Ping(); err == nil {
-			m.logger.Error().Err(err).Msg("Rclone RC server not responding, retrying...")
 			return
 		}
 

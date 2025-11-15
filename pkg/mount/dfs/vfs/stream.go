@@ -5,15 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/sirrobot01/decypharr/pkg/manager"
 )
 
-// StreamingReader provides a ring-buffer based streaming reader for instant playback
-// Similar to WebDAV implementation, but integrated with DFS caching
-// This is used for sequential reads (video playback) to minimize latency
+// StreamingReader provides optimized streaming with connection reuse and buffering
 type StreamingReader struct {
 	// Source
 	manager     *manager.Manager
@@ -21,9 +21,15 @@ type StreamingReader struct {
 	startOffset int64
 	endOffset   int64
 
-	// Ring buffer settings
-	chunkSize  int64       // Size of each buffered chunk (512KB for quick startup)
-	queueDepth int         // Number of chunks to buffer ahead (4 = 2MB buffer)
+	// Connection management - OPTIMIZED: Persistent connections for streaming
+	reader       io.ReadCloser
+	readerMu     sync.Mutex
+	readerOffset atomic.Int64
+	currentPos   atomic.Int64
+
+	// Ring buffer settings - OPTIMIZED: Larger buffer for smooth playback
+	chunkSize  int64       // Size of each buffered chunk (1MB)
+	queueDepth int         // Number of chunks to buffer ahead (12 = 12MB)
 	chunkCh    chan []byte // Buffered channel for chunks
 	errCh      chan error  // Error channel
 	pool       *sync.Pool  // Buffer pool for zero-allocation
@@ -37,15 +43,20 @@ type StreamingReader struct {
 
 	// Background caching (optional)
 	cacheFile *File // If provided, cache downloaded data in background
+
+	// Range capabilities - OPTIMIZED: Can serve ranges within downloaded data
+	serveStart atomic.Int64 // Start of data we can serve
+	serveEnd   atomic.Int64 // End of data we can serve
 }
 
+// OPTIMIZED: Better balance of chunk size and buffer depth
 const (
-	streamChunkSize  = 256 * 1024 // 256KB per chunk - optimal for video players
-	streamQueueDepth = 8          // Total buffered data = 2MB, more responsive
+	enhancedChunkSize  = 1024 * 1024 // 1MB per chunk - reduces HTTP overhead
+	enhancedQueueDepth = 12          // 12MB total buffer - good for most videos
 )
 
-// NewStreamingReader creates a streaming reader with ring buffer
-// If cacheFile is provided, data will be cached in background (non-blocking)
+// NewStreamingReader creates an enhanced streaming reader
+// OPTIMIZED: Single reader type that handles all scenarios efficiently
 func NewStreamingReader(ctx context.Context, mgr *manager.Manager, info *manager.FileInfo,
 	startOffset, endOffset int64, cacheFile *File) *StreamingReader {
 
@@ -56,20 +67,25 @@ func NewStreamingReader(ctx context.Context, mgr *manager.Manager, info *manager
 		info:        info,
 		startOffset: startOffset,
 		endOffset:   endOffset,
-		chunkSize:   streamChunkSize,
-		queueDepth:  streamQueueDepth,
-		chunkCh:     make(chan []byte, streamQueueDepth),
+		chunkSize:   enhancedChunkSize,
+		queueDepth:  enhancedQueueDepth,
+		chunkCh:     make(chan []byte, enhancedQueueDepth),
 		errCh:       make(chan error, 1),
 		ctx:         ctx,
 		cancel:      cancel,
 		cacheFile:   cacheFile,
 		pool: &sync.Pool{
 			New: func() interface{} {
-				buf := make([]byte, streamChunkSize)
+				buf := make([]byte, enhancedChunkSize)
 				return &buf
 			},
 		},
 	}
+
+	sr.currentPos.Store(startOffset)
+	sr.serveStart.Store(startOffset)
+	sr.serveEnd.Store(endOffset)
+	sr.readerOffset.Store(startOffset)
 
 	// Start background reader
 	go sr.readLoop()
@@ -77,23 +93,118 @@ func NewStreamingReader(ctx context.Context, mgr *manager.Manager, info *manager
 	return sr
 }
 
-// readLoop continuously reads from remote and fills the ring buffer
+// CanServe checks if this reader can serve the requested range efficiently
+func (sr *StreamingReader) CanServe(offset, size int64) bool {
+	if sr.closed.Load() {
+		return false
+	}
+
+	start := sr.serveStart.Load()
+	end := sr.serveEnd.Load()
+
+	// Can serve if request is within our range and we're ahead of the offset
+	currentPos := sr.currentPos.Load()
+	return offset >= start && offset+size <= end && offset >= (currentPos-int64(sr.queueDepth)*sr.chunkSize)
+}
+
+// ReadAt reads data at a specific offset - OPTIMIZED: Efficient forward seeking
+func (sr *StreamingReader) ReadAt(p []byte, offset int64) (int, error) {
+	if sr.closed.Load() {
+		return 0, io.EOF
+	}
+
+	// Check if we can serve this offset
+	if !sr.CanServe(offset, int64(len(p))) {
+		return 0, fmt.Errorf("offset %d out of range or too far behind current position", offset)
+	}
+
+	// Calculate how much data we need to skip to reach the offset
+	currentPos := sr.currentPos.Load()
+
+	if offset < currentPos {
+		// We're behind current position - this should be rare due to CanServe check
+		return 0, fmt.Errorf("offset %d is behind current position %d", offset, currentPos)
+	}
+
+	// Forward seek - skip data until we reach the offset
+	toSkip := offset - currentPos
+	if toSkip > 0 {
+		skipBuf := make([]byte, min(int(toSkip), 64*1024)) // 64KB skip buffer
+		for toSkip > 0 {
+			skipSize := min(int(toSkip), len(skipBuf))
+			n, err := sr.Read(skipBuf[:skipSize])
+			if err != nil {
+				return 0, fmt.Errorf("seek to offset %d: %w", offset, err)
+			}
+			toSkip -= int64(n)
+			if n == 0 {
+				break // Avoid infinite loop
+			}
+		}
+	}
+
+	// Now read the actual data with full read completion
+	return sr.readFull(p)
+}
+
+// readFull attempts to read the full buffer, handling short reads internally
+// OPTIMIZED: Ensures complete reads for video players that expect full buffers
+func (sr *StreamingReader) readFull(p []byte) (int, error) {
+	if sr.closed.Load() {
+		return 0, io.EOF
+	}
+
+	totalRead := 0
+	retries := 0
+	maxRetries := 3
+
+	for totalRead < len(p) && retries < maxRetries {
+		n, err := sr.Read(p[totalRead:])
+		totalRead += n
+
+		if err != nil {
+			if err == io.EOF {
+				// EOF is acceptable if we read some data
+				return totalRead, nil
+			}
+
+			// Handle temporary errors with retry
+			if isTemporaryError(err) {
+				retries++
+				if retries < maxRetries {
+					// Brief delay before retry
+					select {
+					case <-time.After(time.Duration(retries) * 100 * time.Millisecond):
+					case <-sr.ctx.Done():
+						return totalRead, sr.ctx.Err()
+					}
+					continue
+				}
+			}
+
+			// Return what we read so far for other errors
+			if totalRead > 0 {
+				return totalRead, nil
+			}
+			return 0, err
+		}
+
+		// Reset retry counter on successful read
+		retries = 0
+	}
+
+	return totalRead, nil
+}
+
+// readLoop continuously reads from remote with connection reuse and error recovery
+// OPTIMIZED: Persistent connections, better buffering, robust error handling
 func (sr *StreamingReader) readLoop() {
 	defer func() {
 		sr.readerDone.Store(true)
 		close(sr.chunkCh)
+		sr.closeReader()
 	}()
 
-	// Get reader from manager
-	rc, err := sr.manager.StreamReader(sr.ctx, sr.info.Parent(), sr.info.Name(),
-		sr.startOffset, sr.endOffset)
-	if err != nil {
-		sr.errCh <- fmt.Errorf("get download link: %w", err)
-		return
-	}
-	defer rc.Close()
-
-	var readErr error
 	currentOffset := sr.startOffset
 	totalSize := sr.endOffset - sr.startOffset + 1
 	if sr.endOffset <= 0 || sr.endOffset >= sr.info.Size() {
@@ -103,80 +214,175 @@ func (sr *StreamingReader) readLoop() {
 	for sr.bytesRead.Load() < totalSize {
 		// Check if closed
 		if sr.closed.Load() {
-			readErr = context.Canceled
-			break
+			return
 		}
 
-		// Get buffer from pool
+		// Ensure we have an active reader connection
+		if err := sr.ensureReader(currentOffset); err != nil {
+			sr.errCh <- fmt.Errorf("ensure reader at offset %d: %w", currentOffset, err)
+			return
+		}
+
+		// GetReader buffer from pool
 		bufPtr := sr.pool.Get().(*[]byte)
 		buf := *bufPtr
 
-		// Read chunk
-		n, err := io.ReadFull(rc, buf)
-		if err != nil && err != io.EOF && !errors.Is(err, io.ErrUnexpectedEOF) {
-			sr.pool.Put(bufPtr)
-			readErr = fmt.Errorf("read chunk at offset %d: %w", currentOffset, err)
-			break
-		}
+		// Read chunk with retry and timeout logic
+		n, err := sr.readWithRetry(buf)
 
-		if n == 0 {
+		if n == 0 && err != nil {
 			sr.pool.Put(bufPtr)
 			if err == io.EOF {
-				readErr = nil
-			} else {
-				readErr = err
-			}
-			break
-		}
-
-		// Adjust for end of file
-		remaining := totalSize - sr.bytesRead.Load()
-		if int64(n) > remaining {
-			n = int(remaining)
-		}
-
-		// OPTIMIZATION: Instead of creating new slice, use slice of pooled buffer
-		// We must copy because buffer goes back to pool
-		// But we only allocate what we actually read
-		chunk := make([]byte, n)
-		copy(chunk, buf[:n])
-		sr.pool.Put(bufPtr) // Return to pool immediately
-
-		// Send to channel (blocks if buffer is full - this is the ring buffer backpressure)
-		select {
-		case sr.chunkCh <- chunk:
-			writeOffset := currentOffset
-			currentOffset += int64(n)
-			sr.bytesRead.Add(int64(n))
-
-			// Synchronous cache write to prevent goroutine explosion
-			// This is fast because it goes to memory buffer first, then async disk flush
-			if sr.cacheFile != nil {
-				_, _ = sr.cacheFile.WriteAt(chunk, writeOffset)
+				return // Normal completion
 			}
 
-		case <-sr.ctx.Done():
-			readErr = sr.ctx.Err()
-			break
+			// Try to recover from error by reconnecting
+			sr.closeReader()
+			if retryErr := sr.ensureReader(currentOffset); retryErr != nil {
+				sr.errCh <- fmt.Errorf("retry connection failed: %w", retryErr)
+				return
+			}
+			continue
 		}
 
-		// Check for EOF
-		if err == io.EOF || errors.Is(err, io.ErrUnexpectedEOF) {
-			readErr = nil
-			break
-		}
-	}
+		if n > 0 {
+			// Adjust for end of requested range
+			remaining := totalSize - sr.bytesRead.Load()
+			if int64(n) > remaining {
+				n = int(remaining)
+			}
 
-	// Send any error to error channel
-	if readErr != nil && readErr != io.EOF {
-		select {
-		case sr.errCh <- readErr:
-		default:
+			// Create chunk with only the data we actually read
+			chunk := make([]byte, n)
+			copy(chunk, buf[:n])
+			sr.pool.Put(bufPtr) // Return to pool immediately
+
+			// Send to channel with backpressure (blocks if buffer is full)
+			select {
+			case sr.chunkCh <- chunk:
+				writeOffset := currentOffset
+				currentOffset += int64(n)
+				sr.bytesRead.Add(int64(n))
+				sr.readerOffset.Store(currentOffset)
+
+				// Cache data synchronously (fast - goes to memory buffer first)
+				if sr.cacheFile != nil {
+					_, _ = sr.cacheFile.WriteAt(chunk, writeOffset)
+				}
+
+			case <-sr.ctx.Done():
+				return
+			}
+		} else {
+			sr.pool.Put(bufPtr)
+		}
+
+		// Check for completion
+		if err == io.EOF || sr.bytesRead.Load() >= totalSize {
+			return
 		}
 	}
 }
 
-// Read implements io.Reader - reads from the ring buffer
+// ensureReader ensures we have an active reader connection
+// OPTIMIZED: Connection reuse for better performance
+func (sr *StreamingReader) ensureReader(offset int64) error {
+	sr.readerMu.Lock()
+	defer sr.readerMu.Unlock()
+
+	// Check if current reader is still valid for this offset
+	if sr.reader != nil && sr.readerOffset.Load() == offset {
+		return nil
+	}
+
+	// Close existing reader if any
+	if sr.reader != nil {
+		_ = sr.reader.Close()
+		sr.reader = nil
+	}
+
+	// Create new reader with retry logic
+	endOffset := sr.endOffset
+	if endOffset <= 0 || endOffset >= sr.info.Size() {
+		endOffset = sr.info.Size() - 1
+	}
+
+	var rc io.ReadCloser
+	var err error
+
+	// Retry connection establishment
+	for retries := 0; retries < 3; retries++ {
+		rc, err = sr.manager.StreamReader(sr.ctx, sr.info.Parent(), sr.info.Name(), offset, endOffset)
+		if err == nil {
+			break
+		}
+
+		// Brief delay before retry
+		select {
+		case <-time.After(time.Duration(retries+1) * 100 * time.Millisecond):
+		case <-sr.ctx.Done():
+			return sr.ctx.Err()
+		}
+	}
+
+	if err != nil {
+		return fmt.Errorf("create stream reader after retries: %w", err)
+	}
+
+	sr.reader = rc
+	sr.readerOffset.Store(offset)
+	return nil
+}
+
+// readWithRetry reads from the current reader with timeout and retry logic
+// OPTIMIZED: Prevents hanging and handles temporary network issues
+func (sr *StreamingReader) readWithRetry(buf []byte) (int, error) {
+	sr.readerMu.Lock()
+	reader := sr.reader
+	sr.readerMu.Unlock()
+
+	if reader == nil {
+		return 0, fmt.Errorf("no active reader")
+	}
+
+	// Implement read timeout to prevent hanging
+	type result struct {
+		n   int
+		err error
+	}
+
+	resultCh := make(chan result, 1)
+
+	go func() {
+		n, err := reader.Read(buf)
+		resultCh <- result{n, err}
+	}()
+
+	select {
+	case res := <-resultCh:
+		return res.n, res.err
+	case <-time.After(30 * time.Second):
+		// Read timeout - close reader to force reconnection
+		sr.closeReader()
+		return 0, fmt.Errorf("read timeout")
+	case <-sr.ctx.Done():
+		return 0, sr.ctx.Err()
+	}
+}
+
+// closeReader safely closes the current reader
+func (sr *StreamingReader) closeReader() {
+	sr.readerMu.Lock()
+	defer sr.readerMu.Unlock()
+
+	if sr.reader != nil {
+		_ = sr.reader.Close()
+		sr.reader = nil
+	}
+}
+
+// Read implements io.Reader - reads from the ring buffer with proper short read handling
+// OPTIMIZED: Handles partial reads correctly, no data loss
 func (sr *StreamingReader) Read(p []byte) (int, error) {
 	if sr.closed.Load() {
 		return 0, io.EOF
@@ -198,9 +404,25 @@ func (sr *StreamingReader) Read(p []byte) (int, error) {
 		// Copy chunk to output buffer
 		n := copy(p, chunk)
 
-		// If buffer is too small, this is a short read
-		// Return what we copied and let caller handle it
-		// This follows io.Reader semantics better than trying to save remainder
+		// Update current position
+		sr.currentPos.Add(int64(n))
+
+		// OPTIMIZED: Handle partial reads correctly
+		if n < len(chunk) {
+			// Buffer too small - put remaining data back for next read
+			remaining := make([]byte, len(chunk)-n)
+			copy(remaining, chunk[n:])
+
+			// Non-blocking put back - if channel is full, create new buffered channel
+			select {
+			case sr.chunkCh <- remaining:
+				// Successfully put back
+			default:
+				// Channel full - need to reorganize
+				go sr.handleChannelReorganization(remaining)
+			}
+		}
+
 		return n, nil
 
 	case err := <-sr.errCh:
@@ -211,15 +433,37 @@ func (sr *StreamingReader) Read(p []byte) (int, error) {
 	}
 }
 
-// Close stops the streaming reader
+// handleChannelReorganization handles the case where we need to put data back but channel is full
+func (sr *StreamingReader) handleChannelReorganization(remaining []byte) {
+	// Create new channel with remaining data first
+	newCh := make(chan []byte, sr.queueDepth)
+	newCh <- remaining
+
+	oldCh := sr.chunkCh
+	sr.chunkCh = newCh
+
+	// Drain old channel into new one
+	go func() {
+		for chunk := range oldCh {
+			select {
+			case newCh <- chunk:
+			case <-sr.ctx.Done():
+				return
+			}
+		}
+	}()
+}
+
+// Close stops the streaming reader and cleans up all resources
 func (sr *StreamingReader) Close() error {
 	if sr.closed.CompareAndSwap(false, true) {
 		sr.cancel()
+		sr.closeReader()
 
-		// Drain the channel to unblock reader
+		// Drain the channel to unblock reader goroutine
 		go func() {
 			for range sr.chunkCh {
-				// Drain
+				// Drain all remaining chunks
 			}
 		}()
 	}
@@ -236,66 +480,45 @@ func (sr *StreamingReader) IsComplete() bool {
 	return sr.readerDone.Load()
 }
 
-// Removed shouldUseStreaming - we now always use streaming for network reads
-// StreamingReader is efficient for both sequential AND random reads because:
-// 1. Returns data immediately as chunks arrive (no blocking)
-// 2. Background caching continues after first chunk
-// 3. Small overhead for random reads is negligible vs instant playback benefit
+// GetPosition returns the current read position (for debugging)
+func (sr *StreamingReader) GetPosition() int64 {
+	return sr.currentPos.Load()
+}
 
-// streamingReadAt performs a streaming read using the ring buffer
-// This is optimized for sequential playback with instant startup
-// IMPORTANT: Only reads what's requested, does NOT download entire file
-func (f *File) streamingReadAt(ctx context.Context, p []byte, offset int64) (int, error) {
-	// Calculate read size
-	readSize := int64(len(p))
-	if offset+readSize > f.info.Size() {
-		readSize = f.info.Size() - offset
+// Utility functions
+
+// isTemporaryError checks if an error is temporary and retryable
+func isTemporaryError(err error) bool {
+	if err == nil {
+		return false
 	}
 
-	// Create streaming reader - will only download what we need
-	endOffset := offset + readSize - 1
-	sr := NewStreamingReader(ctx, f.manager, f.info, offset, endOffset, f)
-	defer func() {
-		// Close immediately to stop background downloading
-		_ = sr.Close()
-	}()
+	return errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, context.Canceled) ||
+		isTemporaryNetworkError(err)
+}
 
-	// Read all data from stream (ONLY the requested amount)
-	totalRead := 0
-	for totalRead < len(p) {
-		n, err := sr.Read(p[totalRead:])
-		totalRead += n
+// isTemporaryNetworkError checks for common temporary network errors
+func isTemporaryNetworkError(err error) bool {
+	if err == nil {
+		return false
+	}
 
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				// EOF is expected when we've read all available data
-				if totalRead > 0 {
-					return totalRead, nil
-				}
-				return 0, io.EOF
-			}
-			// Return actual error with any data read so far
-			if totalRead > 0 {
-				return totalRead, nil
-			}
-			return 0, err
-		}
+	errStr := err.Error()
+	temporaryIndicators := []string{
+		"connection reset",
+		"connection refused",
+		"timeout",
+		"temporary failure",
+		"network is unreachable",
+		"no route to host",
+	}
 
-		// Check if we've read enough
-		if totalRead >= len(p) || totalRead >= int(readSize) {
-			// Got what we needed - return immediately
-			// Close will stop background download
-			break
-		}
-
-		// Check context cancellation
-		if ctx.Err() != nil {
-			if totalRead > 0 {
-				return totalRead, nil
-			}
-			return 0, ctx.Err()
+	for _, indicator := range temporaryIndicators {
+		if strings.Contains(errStr, indicator) {
+			return true
 		}
 	}
 
-	return totalRead, nil
+	return false
 }

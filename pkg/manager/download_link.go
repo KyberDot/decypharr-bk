@@ -13,21 +13,13 @@ import (
 
 // GetDownloadLink gets or fetches a download link for a file
 func (m *Manager) GetDownloadLink(torrent *storage.Torrent, filename string) (types.DownloadLink, error) {
-	// Get the file
+	// GetReader the file
 	file, ok := torrent.Files[filename]
 	if !ok {
 		return types.DownloadLink{}, fmt.Errorf("file %s not found in torrent %s", filename, torrent.GetFolder())
 	}
-
-	// Use active debrid if not specified
-	debridName := torrent.ActiveDebrid
-
-	if debridName == "" {
-		return types.DownloadLink{}, fmt.Errorf("no active debrid for torrent %s", torrent.GetFolder())
-	}
-
-	// Get placement and placement file
-	placementFile, err := m.getPlacementFile(torrent, debridName, filename)
+	// GetReader placement and placement file
+	placementFile, err := m.getPlacementFile(torrent, filename)
 	if err != nil {
 		return types.DownloadLink{}, err
 	}
@@ -35,7 +27,7 @@ func (m *Manager) GetDownloadLink(torrent *storage.Torrent, filename string) (ty
 	// Use the file link/id as the cache key
 	fileLink := placementFile.Link
 	if fileLink == "" {
-		return types.DownloadLink{}, fmt.Errorf("file link is empty for %s in torrent %s", filename, torrent.Folder)
+		return types.DownloadLink{}, fmt.Errorf("file link is missing for %s in torrent %s after refresh", filename, torrent.Name)
 	}
 
 	// Check failure counter
@@ -47,12 +39,12 @@ func (m *Manager) GetDownloadLink(torrent *storage.Torrent, filename string) (ty
 	// Use singleflight to deduplicate concurrent requests
 	v, err, _ := m.downloadSG.Do(fileLink, func() (interface{}, error) {
 		// Double-check cache inside singleflight
-		if dl, err := m.checkDownloadLink(fileLink, debridName); err == nil && !dl.Empty() {
+		if dl, err := m.checkDownloadLink(fileLink, torrent.ActiveDebrid); err == nil && !dl.Empty() {
 			return dl, nil
 		}
 
 		// Fetch the download link
-		dl, err := m.fetchDownloadLink(torrent, file, placementFile, debridName)
+		dl, err := m.fetchDownloadLink(torrent, file, placementFile, torrent.ActiveDebrid)
 		if err != nil {
 			m.downloadSG.Forget(fileLink)
 			return types.DownloadLink{}, err
@@ -73,37 +65,18 @@ func (m *Manager) GetDownloadLink(torrent *storage.Torrent, filename string) (ty
 }
 
 // getPlacementFile retrieves the placement file with refresh/repair fallback
-func (m *Manager) getPlacementFile(torrent *storage.Torrent, debridName, filename string) (*storage.PlacementFile, error) {
-	// Get the file to determine which infohash and debrid it belongs to
+func (m *Manager) getPlacementFile(torrent *storage.Torrent, filename string) (*storage.PlacementFile, error) {
+	// GetReader the file to determine which infohash and debrid it belongs to
 	file, ok := torrent.Files[filename]
 	if !ok {
 		return nil, fmt.Errorf("file %s not found in torrent", filename)
 	}
-
-	// Use file's metadata to find the correct placement
-	fileInfoHash := file.InfoHash
-	if fileInfoHash == "" {
-		// Fallback to torrent's primary infohash
-		fileInfoHash = torrent.InfoHash
-	}
-
-	fileDebrid := file.Debrid
-	if fileDebrid == "" {
-		// Fallback to provided debridName or torrent's active debrid
-		fileDebrid = debridName
-		if fileDebrid == "" {
-			fileDebrid = torrent.ActiveDebrid
-		}
-	}
-
-	// Get the placement using the composite key
-	placementKey := storage.GetPlacementKey(fileDebrid, fileInfoHash)
-	placement := torrent.Placements[placementKey]
+	placement := torrent.Placements[torrent.ActiveDebrid]
 	if placement == nil {
-		return nil, fmt.Errorf("no placement found for debrid %s with infohash %s (key: %s)", fileDebrid, fileInfoHash, placementKey)
+		return nil, fmt.Errorf("no placement found for debrid %s with infohash %s", torrent.ActiveDebrid, torrent.InfoHash)
 	}
 
-	// Get placement-specific file info
+	// GetReader placement-specific file info
 	placementFile := placement.Files[filename]
 	if placementFile == nil || (placementFile.Link == "" && placementFile.Id == "") {
 		// File not in placement or missing link, try refreshing
@@ -117,16 +90,9 @@ func (m *Manager) getPlacementFile(torrent *storage.Torrent, debridName, filenam
 		if file == nil {
 			return nil, fmt.Errorf("file disappeared after refresh")
 		}
-
-		fileInfoHash = file.InfoHash
-		if fileInfoHash == "" {
-			fileInfoHash = refreshed.InfoHash
-		}
-
-		placementKey = storage.GetPlacementKey(fileDebrid, fileInfoHash)
-		placement = refreshed.Placements[placementKey]
+		placement = refreshed.Placements[torrent.ActiveDebrid]
 		if placement == nil {
-			return nil, fmt.Errorf("placement disappeared after refresh for key %s", placementKey)
+			return nil, fmt.Errorf("placement disappeared after refresh for debrid %s", torrent.ActiveDebrid)
 		}
 
 		placementFile = placement.Files[filename]
@@ -149,21 +115,9 @@ func (m *Manager) fetchDownloadLink(torrent *storage.Torrent, file *storage.File
 		return emptyDownloadLink, fmt.Errorf("debrid client not found: %s", debridName)
 	}
 
-	// Get the placement using file's infohash and debrid
-	fileInfoHash := file.InfoHash
-	if fileInfoHash == "" {
-		fileInfoHash = torrent.InfoHash
-	}
-
-	fileDebrid := file.Debrid
-	if fileDebrid == "" {
-		fileDebrid = debridName
-	}
-
-	placementKey := storage.GetPlacementKey(fileDebrid, fileInfoHash)
-	placement := torrent.Placements[placementKey]
+	placement := torrent.Placements[torrent.ActiveDebrid]
 	if placement == nil {
-		return emptyDownloadLink, fmt.Errorf("no placement found for key %s", placementKey)
+		return emptyDownloadLink, fmt.Errorf("no placement found for debrid %s with infohash %s", debridName, torrent.InfoHash)
 	}
 
 	// Convert to types.File for client call
@@ -200,7 +154,7 @@ func (m *Manager) fetchDownloadLink(torrent *storage.Torrent, file *storage.File
 			}
 
 			newDebridName := newTorrent.ActiveDebrid
-			newPlacementFile, err := m.getPlacementFile(newTorrent, newDebridName, file.Name)
+			newPlacementFile, err := m.getPlacementFile(newTorrent, file.Name)
 			if err != nil {
 				return emptyDownloadLink, fmt.Errorf("failed to get placement file after repair: %w", err)
 			}
@@ -309,12 +263,12 @@ func (m *Manager) downloadLinkIsInvalid(downloadLink string) bool {
 
 // GetDownloadByteRange gets the byte range for a file
 func (m *Manager) GetDownloadByteRange(torrentName, filename string) (*[2]int64, error) {
-	t, err := m.storage.GetByName(torrentName)
+	entry, err := m.storage.GetEntry(torrentName)
 	if err != nil {
 		return nil, fmt.Errorf("torrent not found: %w", err)
 	}
 
-	file, ok := t.Files[filename]
+	file, ok := entry.Files[filename]
 	if !ok {
 		return nil, fmt.Errorf("file %s not found in torrent", filename)
 	}

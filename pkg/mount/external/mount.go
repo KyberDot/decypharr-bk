@@ -36,7 +36,7 @@ func NewMount(mountName string, mgr *manager.Manager) (*Mount, error) {
 		name:       mountName,
 	}
 
-	mgr.SetEventHandlers(manager.NewEventHandlers(m))
+	mgr.AddEventHandlers(mountName, manager.NewEventHandlers(m))
 	return m, nil
 }
 

@@ -15,18 +15,18 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/logger"
 	"github.com/sirrobot01/decypharr/pkg/manager"
-	fuseconfig "github.com/sirrobot01/decypharr/pkg/mount/dfs/config"
-	"github.com/sirrobot01/decypharr/pkg/mount/dfs/vfs"
+	fuseconfig "github.com/sirrobot01/decypharr/pkg/mount/dfs/common"
+	"github.com/sirrobot01/decypharr/pkg/mount/dfs/rfs"
 )
 
-// Mount implements a FUSE filesystem with sparse file caching
+// Mount implements a FUSE filesystem with RFS streaming
 type Mount struct {
 	fs.Inode
-	vfs         *vfs.Manager
+	rfs         *rfs.Manager
 	config      *fuseconfig.FuseConfig
 	logger      zerolog.Logger
 	rootDir     *Dir
-	unmountFunc func()
+	unmountFunc func(ctx context.Context)
 	manager     *manager.Manager
 	name        string
 	ready       atomic.Bool
@@ -38,22 +38,20 @@ func NewMount(mountName string, mgr *manager.Manager) (*Mount, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse FUSE config: %w", err)
 	}
-
-	// Create read mgr
-	cacheManager := vfs.NewManager(mgr, fuseConfig)
+	rfsManager := rfs.NewManager(mgr, fuseConfig)
 
 	mount := &Mount{
-		vfs:     cacheManager,
+		rfs:     rfsManager,
 		config:  fuseConfig,
 		logger:  logger.New("dfs").With().Str("mount", mountName).Logger(),
 		manager: mgr,
 		name:    mountName,
 	}
 	now := time.Now()
-	mount.rootDir = NewDir(cacheManager, mgr, "", LevelRoot, uint64(now.Unix()), mount.config, mount.logger)
+	mount.rootDir = NewDir(rfsManager, mgr, "", LevelRoot, uint64(now.Unix()), mount.config, mount.logger)
 
 	// Inject event into the mount
-	mgr.SetEventHandlers(manager.NewEventHandlers(mount))
+	mgr.AddEventHandlers(mountName, manager.NewEventHandlers(mount))
 
 	return mount, nil
 }
@@ -66,9 +64,7 @@ func (m *Mount) Start(ctx context.Context) error {
 
 	// Create mount point if it doesn't exist(skip if on Windows)
 	if runtime.GOOS != "windows" {
-		if err := os.MkdirAll(m.config.MountPath, 0755); err != nil {
-			return fmt.Errorf("failed to create mount point: %w", err)
-		}
+		_ = os.MkdirAll(m.config.MountPath, 0755)
 	}
 	// Try to unmount if already mounted
 	m.forceUnmount()
@@ -108,14 +104,14 @@ func (m *Mount) Start(ctx context.Context) error {
 	mountCtx, cancel := context.WithTimeout(ctx, m.config.DaemonTimeout)
 	defer cancel()
 
-	// Channel to receive the result of fs.Mount
+	// Channel to receive the result of vfs.Mount
 	type fsResult struct {
 		server *fuse.Server
 		err    error
 	}
 	fsResultChan := make(chan fsResult, 1)
 
-	// Run fs.Mount in a goroutine
+	// Run vfs.Mount in a goroutine
 	go func() {
 		server, err := fs.Mount(m.config.MountPath, m.rootDir, opts)
 		fsResultChan <- fsResult{server: server, err: err}
@@ -129,6 +125,7 @@ func (m *Mount) Start(ctx context.Context) error {
 			return fmt.Errorf("failed to create mount: %w", result.err)
 		}
 	case <-mountCtx.Done():
+		m.ready.Store(false)
 		return fmt.Errorf("timeout creating mount: %w", mountCtx.Err())
 	}
 
@@ -153,22 +150,38 @@ func (m *Mount) Start(ctx context.Context) error {
 		return fmt.Errorf("timeout waiting for mount to be ready: %w", mountCtx.Err())
 	}
 
-	umount := func() {
+	umount := func(ctx context.Context) {
 		m.logger.Info().Msg("Unmounting DFS")
 
-		// Close range manager
-		if m.vfs != nil {
-			if err := m.vfs.Close(); err != nil {
-				m.logger.Warn().Err(err).Msg("Failed to close VFS")
+		// Create a channel to track completion
+		done := make(chan struct{})
+
+		go func() {
+			// Close RFS manager
+			if m.rfs != nil {
+				if err := m.rfs.Close(); err != nil {
+					m.logger.Warn().Err(err).Msg("Failed to close RFS")
+				}
 			}
-		}
 
-		_ = server.Unmount()
-		time.Sleep(1 * time.Second)
+			_ = server.Unmount()
+			time.Sleep(1 * time.Second)
 
-		// Check if still mounted
-		if _, err := os.Stat(m.config.MountPath); err == nil {
-			m.logger.Warn().Msg("FUSE filesystem still mounted, attempting force unmount")
+			// Check if still mounted
+			if _, err := os.Stat(m.config.MountPath); err == nil {
+				m.logger.Warn().Msg("FUSE filesystem still mounted, attempting force unmount")
+				m.forceUnmount()
+			}
+
+			close(done)
+		}()
+
+		// Wait for unmount to complete or context timeout
+		select {
+		case <-done:
+			m.logger.Info().Msg("DFS unmounted successfully")
+		case <-ctx.Done():
+			m.logger.Warn().Err(ctx.Err()).Msg("Unmount timed out, forcing unmount")
 			m.forceUnmount()
 		}
 	}
@@ -184,18 +197,20 @@ func (m *Mount) Start(ctx context.Context) error {
 // Stop stops the  FUSE filesystem
 func (m *Mount) Stop() error {
 	m.logger.Info().Msg("Stopping  FUSE filesystem")
-
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	// Unmount first
 	if m.unmountFunc != nil {
-		m.unmountFunc()
+		m.unmountFunc(ctx)
 	} else {
 		// Use force unmount
 		m.forceUnmount()
 	}
 
-	if m.vfs != nil {
-		if err := m.vfs.Close(); err != nil {
-			m.logger.Warn().Err(err).Msg("Failed to close vfs")
+	// Close RFS manager
+	if m.rfs != nil {
+		if err := m.rfs.Close(); err != nil {
+			m.logger.Warn().Err(err).Msg("Failed to close RFS")
 		}
 	}
 	return nil
@@ -203,37 +218,20 @@ func (m *Mount) Stop() error {
 
 // Stats returns structured statistics for this mount
 func (m *Mount) Stats() *MountStats {
-	if m.vfs == nil {
+	var rfsStats map[string]interface{}
+
+	if m.rfs != nil {
+		rfsStats = m.rfs.GetStats()
+	} else {
 		return nil
 	}
 
-	vfsStats := m.vfs.GetStats()
-
 	stats := &MountStats{
-		Name:          m.name,
-		Type:          m.Type(),
-		Mounted:       true,
-		MountPath:     m.config.MountPath,
-		CacheDirSize:  vfsStats["cache_dir_size"].(int64),
-		CacheDirLimit: vfsStats["cache_dir_limit"].(int64),
-		ActiveReads:   vfsStats["active_reads"].(int64),
-		OpenedFiles:   vfsStats["opened_files"].(int64),
-	}
-
-	// Extract memory buffer stats if present
-	if memBuffer, ok := vfsStats["memory_buffer"].(map[string]interface{}); ok {
-		stats.MemoryBuffer = &MemoryBufferStats{
-			Hits:        memBuffer["hits"].(int64),
-			Misses:      memBuffer["misses"].(int64),
-			HitRatePct:  memBuffer["hit_rate_pct"].(float64),
-			Evictions:   memBuffer["evictions"].(int64),
-			Flushes:     memBuffer["flushes"].(int64),
-			FlushBytes:  memBuffer["flush_bytes"].(int64),
-			MemoryUsed:  memBuffer["memory_used"].(int64),
-			MemoryLimit: memBuffer["memory_limit"].(int64),
-			ChunksCount: memBuffer["chunks_count"].(int64),
-			FilesCount:  memBuffer["files_count"].(int),
-		}
+		Name:        m.name,
+		Type:        m.Type(),
+		Mounted:     true,
+		MountPath:   m.config.MountPath,
+		OpenedFiles: int(rfsStats["active_readers"].(int32)),
 	}
 
 	return stats
@@ -310,7 +308,6 @@ func (m *Mount) refreshDirectory(name string) {
 	// Handle root directory refresh
 	child, ok := m.rootDir.children.Load(name)
 	if !ok {
-		m.logger.Warn().Str("dir", name).Msg("Directory not found for refresh")
 		return
 	}
 	dir, ok := child.node.(*Dir)

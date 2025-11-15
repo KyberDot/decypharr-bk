@@ -60,7 +60,7 @@ func (s *Server) isValidAPIToken(r *http.Request) bool {
 		return false
 	}
 
-	// Get auth config and check if token exists
+	// GetReader auth config and check if token exists
 	auth := config.Get().GetAuth()
 	if auth == nil || auth.APIToken == "" {
 		return false

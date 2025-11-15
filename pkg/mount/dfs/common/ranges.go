@@ -1,6 +1,6 @@
-// Package ranges implements efficient tracking of byte ranges for sparse files.
 // Inspired by rclone's ranges package with optimizations for video streaming.
-package ranges
+
+package common
 
 import (
 	"fmt"
@@ -36,8 +36,8 @@ type Ranges struct {
 	ranges []Range
 }
 
-// New creates a new Ranges tracker
-func New() *Ranges {
+// NewRanges creates a new Ranges tracker
+func NewRanges() *Ranges {
 	return &Ranges{
 		ranges: make([]Range, 0),
 	}
