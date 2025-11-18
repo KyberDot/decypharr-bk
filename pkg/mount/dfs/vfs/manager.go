@@ -58,7 +58,7 @@ func NewManager(mgr *manager.Manager, cfg *common.FuseConfig) (*Manager, error) 
 		logger:  logger.New("dfs-vfs"),
 		config:  cfg,
 	}
-	go m.cleanupLoop(ctx, cfg.FileIdleTimeout, cfg.CacheCleanupInterval)
+	go m.cleanupLoop(ctx, cfg.CacheCleanupInterval)
 
 	return m, nil
 }
@@ -110,15 +110,15 @@ func (m *Manager) ReleaseReader(info *manager.FileInfo) {
 }
 
 // cleanupLoop removes idle readers
-func (m *Manager) cleanupLoop(ctx context.Context, idleTimeout, interval time.Duration) {
+func (m *Manager) cleanupLoop(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ticker.C:
-			_, _, _ = m.cleanupSg.Do("idle_file_cleanup", func() (interface{}, error) {
-				m.cleanupIdle(idleTimeout)
+			_, _, _ = m.cleanupSg.Do("idle_reader_cleanup", func() (interface{}, error) {
+				m.cleanupUnusedReaders()
 				return nil, nil
 			})
 
@@ -133,19 +133,25 @@ func (m *Manager) cleanupLoop(ctx context.Context, idleTimeout, interval time.Du
 	}
 }
 
-// cleanupIdle removes idle readers
-func (m *Manager) cleanupIdle(idleTimeout time.Duration) {
-	now := time.Now().UnixNano()
-	threshold := now - idleTimeout.Nanoseconds()
-
+// cleanupUnusedReaders removes readers with zero refcount
+// This runs periodically to clean up readers from closed file handles
+func (m *Manager) cleanupUnusedReaders() {
 	var toRemove []string
 
 	m.readers.Range(func(key string, entry *ReaderEntry) bool {
-		if entry.refCount.Load() <= 0 && entry.lastAccess.Load() < threshold {
+		refCount := entry.refCount.Load()
+
+		// Only cleanup readers with no active file handles
+		// When FileIdleTimeout is 0, we clean up immediately when refCount hits 0
+		if refCount <= 0 {
 			toRemove = append(toRemove, key)
 		}
 		return true
 	})
+
+	if len(toRemove) > 0 {
+		m.logger.Debug().Int("count", len(toRemove)).Msg("Cleaning up unused readers")
+	}
 
 	for _, key := range toRemove {
 		if entry, ok := m.readers.LoadAndDelete(key); ok {

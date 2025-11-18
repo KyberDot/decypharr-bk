@@ -12,7 +12,6 @@ import (
 	"github.com/cavaliergopher/grab/v3"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
@@ -202,7 +201,7 @@ func (d *Downloader) processSymlink(torrent *storage.Torrent, mountPath string) 
 	if !d.manager.config.SkipPreCache && len(filePaths) > 0 {
 		go func() {
 			d.logger.Debug().Msgf("Pre-caching %s", torrent.Name)
-			if err := utils.PreCacheFile(filePaths); err != nil {
+			if err := d.manager.PreCache(filePaths); err != nil {
 				d.logger.Error().Msgf("Failed to pre-cache file: %s", err)
 			} else {
 				d.logger.Debug().Msgf("Pre-cached %d files", len(filePaths))

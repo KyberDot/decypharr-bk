@@ -458,6 +458,12 @@ func (r *Reader) Close() error {
 		// Timeout - downloads may still be running but we'll proceed with cleanup
 	}
 
+	// Release cache file reference
+	// This decrements refCount so cache cleanup can eventually evict the file
+	if r.cacheFile != nil {
+		r.cache.ReleaseCacheFile(r.cacheFile)
+	}
+
 	return nil
 }
 

@@ -264,6 +264,37 @@ func (m *Manager) IsReady() bool {
 	}
 }
 
+// Refresh refreshes directories in the VFS cache
+func (m *Manager) Refresh(dirs []string) error {
+	mountInfo := m.mount.getMountInfo()
+	if mountInfo == nil || !mountInfo.Mounted {
+		return fmt.Errorf("mount is not mounted")
+	}
+
+	if err := m.client.Refresh(dirs, fmt.Sprintf("%s:", m.mount.Provider)); err != nil {
+		m.logger.Error().Err(err).
+			Msg("Failed to refresh directory")
+		return fmt.Errorf("failed to refresh directory %s for provider %s: %w", dirs, m.mount.Provider, err)
+	}
+	return nil
+}
+
+// PreCache pre-caches file headers for faster scanning
+// For rclone, we read small chunks to populate the VFS cache
+func (m *Manager) PreCache(filePaths []string) error {
+	if len(filePaths) == 0 {
+		return nil
+	}
+
+	for _, filePath := range filePaths {
+		if err := m.mount.preCacheFile(filePath); err != nil {
+			m.logger.Debug().Err(err).Str("file", filePath).Msg("Failed to pre-cache file")
+			// Continue with other files
+		}
+	}
+	return nil
+}
+
 func (m *Manager) GetLogger() zerolog.Logger {
 	return m.logger
 }

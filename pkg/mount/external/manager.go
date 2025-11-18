@@ -28,7 +28,7 @@ func NewManager(manager *manager.Manager) *Manager {
 		cfg.Mount.ExternalRclone.RCPassword,
 		_logger,
 	)
-	mnt, err := NewMount(manager, rcloneClient)
+	mnt, err := NewMount(manager)
 	if err != nil {
 		_logger.Error().Err(err).Msg("Failed to create external rclone mount")
 	}
@@ -47,6 +47,26 @@ func (m *Manager) Start(ctx context.Context) error {
 
 func (m *Manager) Stop() error {
 	return nil
+}
+
+// PreCache pre-caches file headers for faster scanning
+// For external mounts, we read small chunks to populate any underlying cache
+func (m *Manager) PreCache(filePaths []string) error {
+	if len(filePaths) == 0 {
+		return nil
+	}
+
+	for _, filePath := range filePaths {
+		if err := m.mount.preCacheFile(filePath); err != nil {
+			m.logger.Debug().Err(err).Str("file", filePath).Msg("Failed to pre-cache file")
+			// Continue with other files
+		}
+	}
+	return nil
+}
+
+func (m *Manager) Refresh(dirs []string) error {
+	return m.client.Refresh(dirs, "")
 }
 
 func (m *Manager) IsReady() bool {

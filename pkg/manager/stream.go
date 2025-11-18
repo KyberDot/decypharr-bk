@@ -74,20 +74,20 @@ func (m *Manager) Stream(ctx context.Context, torrentName, filename string, star
 			Str("filename", filename).
 			Msg("Download link fetch failed, attempting to move torrent to another debrid service")
 
-		//moveErr := m.MoveTorrent(ctx, torrent)
-		//if moveErr != nil {
-		//	return nil, fmt.Errorf("failed to move torrent after download link failure: %w", moveErr)
-		//}
-		//// After moving, try to get the download link again
-		//// This will try to get the link from the new debrid service
-		//torrent, err = m.GetTorrentByName(torrentName)
-		//if err != nil {
-		//	return nil, fmt.Errorf("failed to get torrent after moving: %w", err)
-		//}
-		//downloadLink, err = m.GetDownloadLink(torrent, filename)
-		//if err != nil {
-		//	return nil, fmt.Errorf("failed to get download link after moving torrent: %w", err)
-		//}
+		moveErr := m.MoveTorrent(ctx, torrent)
+		if moveErr != nil {
+			return nil, fmt.Errorf("failed to move torrent after download link failure: %w", moveErr)
+		}
+		// After moving, try to get the download link again
+		// This will try to get the link from the new debrid service
+		torrent, err = m.GetTorrentByFileName(torrentName, filename)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get torrent after moving: %w", err)
+		}
+		downloadLink, err = m.GetDownloadLink(torrent, filename)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get download link after moving torrent: %w", err)
+		}
 	}
 
 	// Outer loop: Link retries
@@ -156,7 +156,7 @@ func (m *Manager) Stream(ctx context.Context, torrentName, filename string, star
 		}
 	}
 
-	return nil, fmt.Errorf("stream failed after %d link retries: %w", m.config.Retries, lastErr)
+	return nil, fmt.Errorf("error streaming %s/%s failed after %d link retries: %w", torrentName, filename, m.config.Retries, lastErr)
 }
 
 func (m *Manager) StreamReader(ctx context.Context, torrentName, filename string, start, end int64) (io.ReadCloser, error) {

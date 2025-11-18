@@ -66,8 +66,6 @@ type Manager struct {
 
 	startTime time.Time
 
-	event *EventHandler
-
 	rootInfo   *FileInfo
 	entry      *EntryCache
 	downloader *Downloader

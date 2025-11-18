@@ -63,7 +63,6 @@ func New(cfg *Config) *req.Client {
 			if err != nil {
 				return isRetryableError(err)
 			}
-			// Check if status code is retryable
 			_, shouldRetry := cfg.RetryableStatus[resp.StatusCode]
 			return shouldRetry
 		}).

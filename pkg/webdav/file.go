@@ -1,12 +1,9 @@
 package webdav
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"sync"
 
 	"github.com/sirrobot01/decypharr/pkg/manager"
 )
@@ -44,10 +41,10 @@ func (h *Handler) StreamResponse(info *manager.FileInfo, w http.ResponseWriter, 
 	defer func(body io.ReadCloser) {
 		_ = body.Close()
 	}(resp.Body)
-	return h.handleSuccessfulResponse(r.Context(), w, resp, start, end)
+	return h.handleSuccessfulResponse(w, resp, start, end)
 }
 
-func (h *Handler) handleSuccessfulResponse(ctx context.Context, w http.ResponseWriter, resp *http.Response, start, end int64) error {
+func (h *Handler) handleSuccessfulResponse(w http.ResponseWriter, resp *http.Response, start, end int64) error {
 	statusCode := http.StatusOK
 	if start > 0 || end > 0 {
 		statusCode = http.StatusPartialContent
@@ -66,121 +63,55 @@ func (h *Handler) handleSuccessfulResponse(ctx context.Context, w http.ResponseW
 	}
 
 	w.Header().Set("Accept-Ranges", "bytes")
-	return h.streamWithRingBuffer(ctx, w, resp.Body, statusCode)
+	return h.streamBuffer(w, resp.Body, statusCode)
 }
 
-type bufferedChunk struct {
-	buf []byte
-	n   int
-}
-
-func (h *Handler) streamWithRingBuffer(ctx context.Context, w http.ResponseWriter, src io.Reader, statusCode int) error {
+func (h *Handler) streamBuffer(w http.ResponseWriter, src io.Reader, statusCode int) error {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		return fmt.Errorf("response does not support flushing")
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	smallBuf := make([]byte, 64*1024) // 64 KB
+	if n, err := src.Read(smallBuf); n > 0 {
+		// Write status code just before first successful write
+		w.WriteHeader(statusCode)
 
-	pool := sync.Pool{
-		New: func() any {
-			buf := make([]byte, defaultChunkSize)
-			return &buf
-		},
+		if _, werr := w.Write(smallBuf[:n]); werr != nil {
+			if isClientDisconnection(werr) {
+				return &streamError{Err: werr, StatusCode: 0, IsClientDisconnection: true}
+			}
+			// Headers already sent, can't send HTTP error response
+			return &streamError{Err: werr, StatusCode: 0, IsClientDisconnection: false}
+		}
+		flusher.Flush()
+	} else if err != nil && err != io.EOF {
+		return &streamError{Err: err, StatusCode: http.StatusInternalServerError}
 	}
 
-	chunkCh := make(chan bufferedChunk, defaultQueueDepth)
-	errCh := make(chan error, 1)
-
-	go func() {
-		defer close(chunkCh)
-
-		var readErr error
-
-	readLoop:
-		for {
-			if err := ctx.Err(); err != nil {
-				readErr = err
-				break readLoop
-			}
-
-			bufPtr := pool.Get().(*[]byte)
-			buf := *bufPtr
-			n, err := src.Read(buf)
-
-			if n > 0 {
-				select {
-				case chunkCh <- bufferedChunk{buf: buf, n: n}:
-				case <-ctx.Done():
-					pool.Put(bufPtr)
-					readErr = ctx.Err()
-					break readLoop
-				}
-			} else {
-				pool.Put(bufPtr)
-			}
-
-			if err != nil {
-				if errors.Is(err, io.EOF) {
-					readErr = nil
-				} else {
-					readErr = err
-				}
-				break readLoop
-			}
-		}
-
-		errCh <- readErr
-	}()
-
-	w.WriteHeader(statusCode)
-
-	var writeErr error
-
-writeLoop:
+	buf := make([]byte, 256*1024) // 256 KB
 	for {
-		select {
-		case <-ctx.Done():
-			writeErr = &streamError{Err: ctx.Err(), StatusCode: 0, IsClientDisconnection: true}
-			break writeLoop
-
-		case chunk, ok := <-chunkCh:
-			if !ok {
-				break writeLoop
-			}
-
-			_, err := w.Write(chunk.buf[:chunk.n])
-			pool.Put(&chunk.buf)
-
-			if err != nil {
-				if isClientDisconnection(err) {
-					writeErr = &streamError{Err: err, StatusCode: 0, IsClientDisconnection: true}
-				} else {
-					writeErr = &streamError{Err: err, StatusCode: http.StatusInternalServerError}
+		n, readErr := src.Read(buf)
+		if n > 0 {
+			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+				if isClientDisconnection(writeErr) {
+					return &streamError{Err: writeErr, StatusCode: 0, IsClientDisconnection: true}
 				}
-				break writeLoop
+				// Headers already sent, can't send HTTP error response
+				return &streamError{Err: writeErr, StatusCode: 0, IsClientDisconnection: false}
 			}
-
 			flusher.Flush()
 		}
-	}
-
-	cancel()
-	readErr := <-errCh
-
-	if writeErr != nil {
-		return writeErr
-	}
-
-	if readErr != nil {
-		if isClientDisconnection(readErr) {
-			return &streamError{Err: readErr, StatusCode: 0, IsClientDisconnection: true}
+		if readErr != nil {
+			if readErr == io.EOF {
+				return nil
+			}
+			if isClientDisconnection(readErr) {
+				return &streamError{Err: readErr, StatusCode: 0, IsClientDisconnection: true}
+			}
+			return readErr
 		}
-		return &streamError{Err: readErr, StatusCode: http.StatusInternalServerError}
 	}
-
-	return nil
 }
 
 func (h *Handler) getRange(info *manager.FileInfo, r *http.Request) (int64, int64) {

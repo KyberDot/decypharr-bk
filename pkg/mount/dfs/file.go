@@ -2,6 +2,7 @@ package dfs
 
 import (
 	"context"
+	"errors"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -24,7 +25,7 @@ type File struct {
 	info      *manager.FileInfo
 	createdAt time.Time
 	content   []byte // For files like version.txt
-	rfs       *vfs.Manager
+	vfs       *vfs.Manager
 }
 
 // FileHandle implements file operations with RFS
@@ -47,12 +48,12 @@ var _ = (fs.FileFlusher)((*FileHandle)(nil))
 var _ = (fs.FileFsyncer)((*FileHandle)(nil))
 
 // newFile creates a new file
-func newFile(rfsManager *vfs.Manager, config *common.FuseConfig, info *manager.FileInfo, logger zerolog.Logger) *File {
+func newFile(vfsManager *vfs.Manager, config *common.FuseConfig, info *manager.FileInfo, logger zerolog.Logger) *File {
 	return &File{
 		config: config,
 		logger: logger,
 		info:   info,
-		rfs:    rfsManager,
+		vfs:    vfsManager,
 	}
 }
 
@@ -108,17 +109,10 @@ func (fh *FileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.Re
 		return fuse.ReadResultData(data), 0
 	}
 
-	// Lazy-create RFS reader on first read
-	// CRITICAL: Reader is created ONCE and persists across all reads!
-	// This enables:
-	// - HTTP connection reuse
-	// - Sequential read detection
-	// - Intelligent prefetching
-	// - Progressive chunk delivery
 	if fh.file.info.IsRemote() {
 		fh.readerOnce.Do(func() {
 			var err error
-			fh.reader, err = fh.file.rfs.GetReader(fh.file.info)
+			fh.reader, err = fh.file.vfs.GetReader(fh.file.info)
 			fh.readerErr = err
 		})
 
@@ -130,15 +124,28 @@ func (fh *FileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.Re
 
 	// Ensure we have an RFS reader
 	if fh.reader == nil {
+		fh.logger.Error().Msg("RFS reader is nil")
 		return nil, syscall.EIO
 	}
 
 	// Read from RFS (with automatic prefetching, connection reuse, etc.)
 	n, err := fh.reader.ReadAt(dest, off)
-	if err != nil && err != io.EOF {
+	if err != nil && !skippableError(err) {
+		fh.logger.Error().
+			Err(err).
+			Int64("offset", off).
+			Int("size", len(dest)).
+			Msg("Failed to read from RFS")
 		return nil, syscall.EIO
 	}
 	return fuse.ReadResultData(dest[:n]), 0
+}
+
+func skippableError(err error) bool {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	return false
 }
 
 // readFromStaticContent handles static content like version.txt
@@ -164,7 +171,7 @@ func (fh *FileHandle) Release(ctx context.Context) syscall.Errno {
 	// The reader is pooled and managed by RFS Manager
 	// It will be automatically cleaned up when idle
 	if fh.reader != nil {
-		fh.file.rfs.ReleaseReader(fh.file.info)
+		fh.file.vfs.ReleaseReader(fh.file.info)
 	}
 
 	return 0

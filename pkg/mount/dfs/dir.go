@@ -26,7 +26,7 @@ const (
 // Dir implements a FUSE directory with RFS streaming
 type Dir struct {
 	fs.Inode
-	rfs           *vfs.Manager
+	vfs           *vfs.Manager
 	level         DirLevel
 	name          string
 	children      *xsync.Map[string, *ChildEntry] // key is the child name
@@ -49,9 +49,9 @@ var _ = (fs.NodeGetattrer)((*Dir)(nil))
 var _ = (fs.NodeUnlinker)((*Dir)(nil))
 
 // NewDir creates a new directory
-func NewDir(rfsManager *vfs.Manager, manager *manager.Manager, name string, level DirLevel, modTime uint64, config *common.FuseConfig, logger zerolog.Logger) *Dir {
+func NewDir(vfsManager *vfs.Manager, manager *manager.Manager, name string, level DirLevel, modTime uint64, config *common.FuseConfig, logger zerolog.Logger) *Dir {
 	return &Dir{
-		rfs:      rfsManager,
+		vfs:      vfsManager,
 		name:     name,
 		children: xsync.NewMap[string, *ChildEntry](),
 		level:    level,
@@ -77,13 +77,19 @@ func (d *Dir) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) 
 }
 
 func (d *Dir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	// First check if child already exists in cache (fast path)
+	child, exists := d.children.Load(name)
+	if exists {
+		return d.returnExistingChild(ctx, name, child, out)
+	}
+
 	// Not in cache - behavior depends on directory level
 	switch d.level {
 	case LevelRoot, LevelTorrent:
 		// For root and torrent levels, populate all children
 		d.populateChildren(ctx)
 		// Try again after population
-		child, exists := d.children.Load(name)
+		child, exists = d.children.Load(name)
 		if !exists {
 			return nil, syscall.ENOENT
 		}
@@ -103,7 +109,7 @@ func (d *Dir) returnExistingChild(ctx context.Context, name string, child *Child
 	if child.node == nil {
 		if child.attr.Mode&fuse.S_IFDIR != 0 {
 			// It's a directory - create the Dir node
-			child.node = NewDir(d.rfs, d.manager, name, d.level+1, d.modTime, d.config, d.logger)
+			child.node = NewDir(d.vfs, d.manager, name, d.level+1, d.modTime, d.config, d.logger)
 		} else {
 			// It's a file - shouldn't happen as files are always created fully
 			return nil, syscall.ENOENT
@@ -174,11 +180,8 @@ func (d *Dir) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 }
 
 func (d *Dir) Refresh() {
-	// Clear children map to force repopulation
-	d.children.Clear()
 	// Reset our internal populated flag
 	d.populated.Store(false)
-	// Notify kernel to invalidate directory content cache
 	_ = d.NotifyEntry(d.name)
 }
 
@@ -329,7 +332,7 @@ func (d *Dir) populateTorrent(ctx context.Context) {
 
 func (d *Dir) addContentFile(entry manager.FileInfo) {
 	fileNode := newFile(
-		d.rfs,
+		d.vfs,
 		d.config,
 		&entry,
 		d.logger,
@@ -347,7 +350,7 @@ func (d *Dir) addContentFile(entry manager.FileInfo) {
 }
 
 func (d *Dir) addDirectory(entry *manager.FileInfo) {
-	dirNode := NewDir(d.rfs, d.manager, entry.Name(), d.level+1, uint64(entry.ModTime().Unix()), d.config, d.logger)
+	dirNode := NewDir(d.vfs, d.manager, entry.Name(), d.level+1, uint64(entry.ModTime().Unix()), d.config, d.logger)
 
 	// Hash full path to ensure unique inodes
 	fullPath := d.name + "/" + entry.Name()
@@ -365,7 +368,7 @@ func (d *Dir) addDirectory(entry *manager.FileInfo) {
 
 func (d *Dir) addFile(entry *manager.FileInfo) {
 
-	fileNode := newFile(d.rfs, d.config, entry, d.logger)
+	fileNode := newFile(d.vfs, d.config, entry, d.logger)
 
 	// Hash full path to ensure unique inodes
 	fullPath := d.name + "/" + entry.Name()

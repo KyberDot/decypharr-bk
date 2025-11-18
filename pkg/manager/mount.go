@@ -11,21 +11,8 @@ type MountManager interface {
 	Stats() map[string]interface{}
 	IsReady() bool
 	Type() string
-}
-
-type Mount interface {
-	Start(ctx context.Context) error
-	Stop() error
+	PreCache(filePaths []string) error
 	Refresh(dirs []string) error
-	Type() string
-}
-
-type EventHandler struct {
-	Refresh func(dirs []string) error
-}
-
-func (m *Manager) SetEventHandler(e *EventHandler) {
-	m.event = e
 }
 
 func (m *Manager) RefreshEntries(refreshMount bool) {
@@ -49,19 +36,29 @@ func (m *Manager) RefreshMount() error {
 	}
 
 	// Call event handler if set
-	if m.event != nil && m.event.Refresh != nil {
-		return m.event.Refresh(dirs)
+	if m.mountManager != nil && m.mountManager.Refresh != nil {
+		return m.mountManager.Refresh(dirs)
 	}
 	return nil
 }
 
-func NewEventHandlers(mounter Mount) *EventHandler {
-	return &EventHandler{
-		Refresh: mounter.Refresh,
+// PreCache calls the mount's PreCache method via event handler
+func (m *Manager) PreCache(filePaths []string) error {
+	if m.mountManager != nil && m.mountManager.PreCache != nil {
+		return m.mountManager.PreCache(filePaths)
 	}
+	return nil
 }
 
 type stubMountManager struct{}
+
+func (s *stubMountManager) PreCache(filePaths []string) error {
+	return nil
+}
+
+func (s *stubMountManager) Refresh(dirs []string) error {
+	return nil
+}
 
 func NewStubMountManager() MountManager {
 	return &stubMountManager{}

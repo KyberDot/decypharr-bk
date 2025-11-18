@@ -22,7 +22,7 @@ import (
 // Mount implements a FUSE filesystem with RFS streaming
 type Mount struct {
 	fs.Inode
-	rfs         *vfs.Manager
+	vfs         *vfs.Manager
 	config      *fuseconfig.FuseConfig
 	logger      zerolog.Logger
 	rootDir     *Dir
@@ -38,23 +38,20 @@ func NewMount(mountName string, mgr *manager.Manager) (*Mount, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse FUSE config: %w", err)
 	}
-	rfsManager, err := vfs.NewManager(mgr, fuseConfig)
+	vfsManager, err := vfs.NewManager(mgr, fuseConfig)
 	if err != nil {
-		return nil, fmt.Errorf("create rfs manager: %w", err)
+		return nil, fmt.Errorf("create vfs manager: %w", err)
 	}
 
 	mount := &Mount{
-		rfs:     rfsManager,
+		vfs:     vfsManager,
 		config:  fuseConfig,
 		logger:  logger.New("dfs").With().Str("mount", mountName).Logger(),
 		manager: mgr,
 		name:    mountName,
 	}
 	now := time.Now()
-	mount.rootDir = NewDir(rfsManager, mgr, "", LevelRoot, uint64(now.Unix()), mount.config, mount.logger)
-
-	// Inject event into the mount
-	mgr.SetEventHandler(manager.NewEventHandlers(mount))
+	mount.rootDir = NewDir(vfsManager, mgr, "", LevelRoot, uint64(now.Unix()), mount.config, mount.logger)
 
 	return mount, nil
 }
@@ -161,8 +158,8 @@ func (m *Mount) Start(ctx context.Context) error {
 
 		go func() {
 			// Close RFS manager
-			if m.rfs != nil {
-				if err := m.rfs.Close(); err != nil {
+			if m.vfs != nil {
+				if err := m.vfs.Close(); err != nil {
 					m.logger.Warn().Err(err).Msg("Failed to close RFS")
 				}
 			}
@@ -211,8 +208,8 @@ func (m *Mount) Stop() error {
 	}
 
 	// Close RFS manager
-	if m.rfs != nil {
-		if err := m.rfs.Close(); err != nil {
+	if m.vfs != nil {
+		if err := m.vfs.Close(); err != nil {
 			m.logger.Warn().Err(err).Msg("Failed to close RFS")
 		}
 	}
@@ -221,8 +218,8 @@ func (m *Mount) Stop() error {
 
 // Stats returns structured statistics for this mount
 func (m *Mount) Stats() map[string]interface{} {
-	if m.rfs != nil {
-		return m.rfs.GetStats()
+	if m.vfs != nil {
+		return m.vfs.GetStats()
 	} else {
 		return nil
 	}
@@ -286,37 +283,16 @@ func (m *Mount) tryUnmountCommand(args ...string) error {
 	return cmd.Run()
 }
 
-func (m *Mount) Refresh(dirs []string) error {
-	for _, dir := range dirs {
-		m.refreshDirectory(dir)
-	}
-
-	return nil
-}
-
-// refreshDirectory navigates to a specific directory path and refreshes it
 func (m *Mount) refreshDirectory(name string) {
 	// Handle root directory refresh
 	child, ok := m.rootDir.children.Load(name)
 	if !ok {
-		m.logger.Warn().Str("dir", name).Msg("Directory not found in root")
+		m.logger.Warn().Str("dir", name).Msg("Directory not found for refresh")
 		return
 	}
-
-	// If node is nil (lazy-loaded), create it now
-	if child.node == nil {
-		if child.attr.Mode&fuse.S_IFDIR != 0 {
-			// It's a directory - create the Dir node
-			child.node = NewDir(m.rootDir.rfs, m.rootDir.manager, name, m.rootDir.level+1, m.rootDir.modTime, m.rootDir.config, m.logger)
-		} else {
-			m.logger.Warn().Str("dir", name).Msg("Entry is not a directory")
-			return
-		}
-	}
-
 	dir, ok := child.node.(*Dir)
 	if !ok {
-		m.logger.Warn().Str("dir", name).Msg("Node is not a directory")
+		m.logger.Warn().Str("dir", name).Msg("MountPath is not a directory")
 		return
 	}
 	dir.Refresh()

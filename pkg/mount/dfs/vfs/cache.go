@@ -47,6 +47,7 @@ type CacheFile struct {
 	file       *os.File
 	size       int64
 	lastAccess atomic.Int64
+	refCount   atomic.Int32 // Reference count from active readers
 
 	// Sharded range tracking for high concurrency
 	ranges *common.ShardedRanges
@@ -100,13 +101,14 @@ func (c *Cache) saveAllMetadata() {
 	})
 }
 
-// GetOrCreate gets or creates a cached file
+// GetOrCreate gets or creates a cached file and increments refCount
 func (c *Cache) GetOrCreate(torrent, filename string, size int64) (*CacheFile, error) {
 	key := filepath.Join(torrent, filename)
 
 	if val, ok := c.files.Load(key); ok {
 		cf := val.(*CacheFile)
 		cf.lastAccess.Store(time.Now().UnixNano())
+		cf.refCount.Add(1) // Increment reference count
 		return cf, nil
 	}
 
@@ -151,9 +153,13 @@ func (c *Cache) GetOrCreate(torrent, filename string, size int64) (*CacheFile, e
 	if loaded {
 		file.Close()
 		close(cf.snapshotStop)
-		return actual.(*CacheFile), nil
+		actualCF := actual.(*CacheFile)
+		actualCF.refCount.Add(1) // Increment reference count
+		return actualCF, nil
 	}
 
+	// Set initial refCount to 1 for the newly created cache file
+	cf.refCount.Store(1)
 	return cf, nil
 }
 
@@ -273,13 +279,26 @@ func (c *Cache) getFileCount() int {
 	return count
 }
 
+// ReleaseCacheFile decrements refCount on a cache file
+// Called when a Reader is closed
+func (c *Cache) ReleaseCacheFile(cf *CacheFile) {
+	cf.refCount.Add(-1)
+	cf.lastAccess.Store(time.Now().UnixNano())
+}
+
 // CloseCacheFile closes a specific cache file
+// Should only be called when refCount is 0
 func (c *Cache) CloseCacheFile(cf *CacheFile) error {
 	// Save range metadata to xattr before closing
 	_ = c.saveRangeMetadata(cf)
 
 	// Stop snapshot updater
-	close(cf.snapshotStop)
+	select {
+	case <-cf.snapshotStop:
+		// Already closed
+	default:
+		close(cf.snapshotStop)
+	}
 
 	// Close file handle
 	return cf.file.Close()
@@ -447,13 +466,19 @@ func (c *Cache) cleanup() {
 			break
 		}
 
-		// Close cache file if open
+		// CRITICAL: Only close/remove if not actively in use
 		if entry.isOpen && entry.cacheFile != nil {
+			// Check if any readers are using this cache file
+			if entry.cacheFile.refCount.Load() > 0 {
+				// Skip - file is actively in use by readers
+				continue
+			}
+
 			// Remove from cache map first
 			relPath, _ := filepath.Rel(c.cacheDir, entry.path)
 			c.files.Delete(relPath)
 
-			// Close the cache file
+			// Close the cache file (safe now since refCount is 0)
 			_ = c.CloseCacheFile(entry.cacheFile)
 		}
 

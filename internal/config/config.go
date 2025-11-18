@@ -194,9 +194,7 @@ type DFS struct {
 	GID                uint32 `json:"gid,omitempty"`                 // Group ID for mounted files
 	Umask              string `json:"umask,omitempty"`               // File permissions mask
 	AllowOther         bool   `json:"allow_other,omitempty"`         // Allow other users to access mount
-	AllowRoot          bool   `json:"allow_root,omitempty"`          // Allow root user to access mount
 	DefaultPermissions bool   `json:"default_permissions,omitempty"` // Enable permission checking
-	AsyncRead          bool   `json:"async_read,omitempty"`          // Enable asynchronous reads
 
 	// Advanced settings
 	AttrTimeout     string `json:"attr_timeout,omitempty"`     // Attribute cache timeout
@@ -205,18 +203,6 @@ type DFS struct {
 
 	// Health and monitoring
 	StatsInterval string `json:"stats_interval,omitempty"` // How often to log stats
-
-	// Smart caching
-	SmartCaching bool `json:"smart_caching,omitempty"` // Enable smart prefetching for episodes
-
-	// Memory-only mode (no disk caching)
-	MemoryOnlyMode   bool   `json:"memory_only_mode,omitempty"`   // Enable pure memory streaming (no disk cache)
-	MemoryLimit      string `json:"memory_limit,omitempty"`       // Per-file memory limit (e.g., 100MB)
-	MemoryChunkSize  string `json:"memory_chunk_size,omitempty"`  // Memory chunk size (e.g., 2MB)
-	MemoryBufferSize string `json:"memory_buffer_size,omitempty"` // Ring buffer size (e.g., 8MB)
-
-	// V2 Architecture (rclone-style persistent connections and unified buffering)
-	UseV2Architecture bool `json:"use_v2_architecture,omitempty"` // Enable V2 architecture with ChunkedReader (RECOMMENDED for production)
 }
 
 type ExternalRclone struct {
@@ -492,15 +478,6 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if val := getEnv("MOUNT__DFS__ALLOW_OTHER"); val != "" {
 		c.Mount.DFS.AllowOther = parseBool(val)
-	}
-	if val := getEnv("MOUNT__DFS__ALLOW_ROOT"); val != "" {
-		c.Mount.DFS.AllowRoot = parseBool(val)
-	}
-	if val := getEnv("MOUNT__DFS__DEFAULT_PERMISSIONS"); val != "" {
-		c.Mount.DFS.DefaultPermissions = parseBool(val)
-	}
-	if val := getEnv("MOUNT__DFS__ASYNC_READ"); val != "" {
-		c.Mount.DFS.AsyncRead = parseBool(val)
 	}
 	if val := getEnv("MOUNT__DFS__ATTR_TIMEOUT"); val != "" {
 		c.Mount.DFS.AttrTimeout = val

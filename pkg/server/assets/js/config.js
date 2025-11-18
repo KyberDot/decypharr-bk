@@ -185,7 +185,7 @@ class ConfigManager {
         const fields = [
             'cache_dir', 'disk_cache_size', 'cache_expiry', 'cache_cleanup_interval',
             'chunk_size', 'read_ahead_size', 'max_concurrent_reads', 'daemon_timeout',
-            'uid', 'gid', 'umask', 'allow_other', 'allow_root', 'default_permissions', 'async_read',
+            'uid', 'gid', 'umask', 'allow_other', 'default_permissions',
             'attr_timeout', 'entry_timeout', 'negative_timeout'
         ];
 
@@ -1230,9 +1230,7 @@ class ConfigManager {
             gid: getElementValue('gid', 0),
             umask: getElementValue('umask'),
             allow_other: getElementValue('allow_other', false),
-            allow_root: getElementValue('allow_root', false),
             default_permissions: getElementValue('default_permissions', false),
-            async_read: getElementValue('async_read', false),
             attr_timeout: getElementValue('attr_timeout'),
             entry_timeout: getElementValue('entry_timeout'),
             negative_timeout: getElementValue('negative_timeout')

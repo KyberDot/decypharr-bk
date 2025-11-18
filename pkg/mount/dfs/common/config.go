@@ -19,8 +19,7 @@ type FuseConfig struct {
 	CacheDiskSize        int64 // in bytes
 	CacheCleanupInterval time.Duration
 
-	CacheExpiry     time.Duration
-	FileIdleTimeout time.Duration
+	CacheExpiry time.Duration
 
 	// Performance settings
 	ChunkSize          int64
@@ -55,7 +54,6 @@ func DefaultFuseConfig() *FuseConfig {
 		CacheExpiry:          24 * time.Hour,   // Longer cache for popular content
 		CacheCleanupInterval: 5 * time.Minute,  // More frequent cleanup
 		AsyncRead:            true,
-		FileIdleTimeout:      1 * time.Minute, // Idle file handle timeout
 
 		// File system defaults
 		UID:                1000,
@@ -135,7 +133,7 @@ func ParseFuseConfig(mountName string) (*FuseConfig, error) {
 	if cfg.CacheExpiry != "" {
 		ttl, err := time.ParseDuration(cfg.CacheExpiry)
 		if err != nil {
-			return nil, fmt.Errorf("invalid memory cache TTL: %w", err)
+			return nil, fmt.Errorf("invalid cache TTL: %w", err)
 		}
 		fuseConfig.CacheExpiry = ttl
 	}
@@ -165,7 +163,6 @@ func ParseFuseConfig(mountName string) (*FuseConfig, error) {
 	fuseConfig.UID = cfg.UID
 	fuseConfig.GID = cfg.GID
 	fuseConfig.AllowOther = cfg.AllowOther
-	fuseConfig.AsyncRead = cfg.AsyncRead
 	fuseConfig.DefaultPermissions = cfg.DefaultPermissions
 
 	if cfg.Umask != "" {
