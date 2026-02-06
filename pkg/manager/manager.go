@@ -89,7 +89,7 @@ func New() *Manager {
 	_logger := logger.New("manager")
 
 	// Create storage directory
-	dbPath := filepath.Join(config.GetMainPath(), "decypharr.db")
+	dbPath := filepath.Join(config.GetMainPath(), "db")
 
 	strg, err := storage.NewStorage(dbPath)
 	if err != nil {

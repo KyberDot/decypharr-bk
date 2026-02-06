@@ -130,6 +130,8 @@ func New(config Config) (*Store, error) {
 	logPath := config.DataPath
 	var err error
 
+	fmt.Println("Opening log at", logPath)
+
 	s.log, err = openAppendLog(logPath)
 	if err != nil {
 		cancel()

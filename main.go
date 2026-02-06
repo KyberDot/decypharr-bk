@@ -9,6 +9,8 @@ import (
 	"runtime/debug"
 	"syscall"
 
+	"github.com/sirrobot01/decypharr/internal/config"
+
 	"github.com/sirrobot01/decypharr/cmd/decypharr"
 )
 
@@ -25,6 +27,8 @@ func main() {
 	flag.StringVar(&configPath, "config", "/data", "path to the data folder")
 	flag.StringVar(&pprofAddr, "pprof", ":6060", "pprof server address (set to empty to disable)")
 	flag.Parse()
+	config.SetConfigPath(configPath)
+	config.Get()
 
 	// Create a context canceled on SIGINT/SIGTERM
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

@@ -26,28 +26,6 @@ type Storage struct {
 	logger     zerolog.Logger
 }
 
-// Moves old data.log files to a single directory structure
-func moveItemsToNewPaths(baseDir string) error {
-	for _, name := range storeNames {
-		oldPath := filepath.Join(baseDir, name, "data.log")
-		newPath := filepath.Join(baseDir, name+".db")
-		if _, err := os.Stat(oldPath); err == nil {
-			if err := os.Rename(oldPath, newPath); err != nil {
-				return fmt.Errorf("failed to move %s to new path: %w", name, err)
-			}
-		}
-	}
-
-	// Remove old directories
-	for _, name := range storeNames {
-		oldDir := filepath.Join(baseDir, name)
-		if _, err := os.Stat(oldDir); err == nil {
-			_ = os.RemoveAll(oldDir)
-		}
-	}
-	return nil
-}
-
 func createItemStores(baseDir string, baseConfig hybrid.Config) (map[string]*hybrid.Store, error) {
 	items := make(map[string]*hybrid.Store)
 	for _, name := range storeNames {
@@ -69,13 +47,11 @@ func createItemStores(baseDir string, baseConfig hybrid.Config) (map[string]*hyb
 // NewStorage creates a new storage instance with HybridStore
 func NewStorage(dbPath string) (*Storage, error) {
 	dbPath = filepath.Clean(dbPath)
-	dataDir := filepath.Dir(dbPath)
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
+	if err := os.MkdirAll(dbPath, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create db directory: %w", err)
 	}
 
 	log := logger.New("storage")
-	dbDir := filepath.Join(dataDir, "db")
 
 	// Base config
 	baseConfig := hybrid.Config{
@@ -84,13 +60,9 @@ func NewStorage(dbPath string) (*Storage, error) {
 		CompactionThreshold: 0.5,
 		AutoCompact:         true,
 	}
-	// Move old data.log files to new paths
-	if err := moveItemsToNewPaths(dbDir); err != nil {
-		return nil, fmt.Errorf("failed to move old data files: %w", err)
-	}
 
 	// Create item stores
-	itemStores, err := createItemStores(dbDir, baseConfig)
+	itemStores, err := createItemStores(dbPath, baseConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create item stores: %w", err)
 	}
@@ -107,7 +79,7 @@ func NewStorage(dbPath string) (*Storage, error) {
 		entryItems: entryItems,
 		repairJobs: repairJobs,
 		repairKeys: repairKeys,
-		dir:        dbDir,
+		dir:        dbPath,
 		logger:     log,
 	}
 
