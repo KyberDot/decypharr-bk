@@ -10,22 +10,22 @@ description: Install Decypharr via Docker or binary.
 Create a `docker-compose.yml`:
 
 ```yaml
-version: '3.8'
 services:
   decypharr:
-    image: sirrobot01/decypharr:latest
+    image: cy01/blackhole:latest
     container_name: decypharr
     ports:
       - "8282:8282"
     volumes:
-      - ./config:/config
-      - ./downloads:/downloads
-      - ./cache:/cache
+      - /mnt/:/mnt:rshared
+      - ./configs/:/app # config.json must be in this directory
     restart: unless-stopped
-    environment:
-      - PUID=1000
-      - PGID=1000
-      - TZ=America/New_York
+    devices:
+      - /dev/fuse:/dev/fuse:rwm
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
 ```
 
 Run:
@@ -42,11 +42,15 @@ Access at `http://localhost:8282`
 docker run -d \
   --name=decypharr \
   -p 8282:8282 \
-  -v ./config:/config \
+  -v ./config:/app \
   -v ./downloads:/downloads \
   -v ./cache:/cache \
   -e PUID=1000 \
   -e PGID=1000 \
+    --restart unless-stopped \
+    --device /dev/fuse:/dev/fuse:rwm \
+    --cap-add SYS_ADMIN \
+    --security-opt apparmor:unconfined \
   sirrobot01/decypharr:latest
 ```
 
