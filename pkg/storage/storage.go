@@ -92,11 +92,7 @@ func NewStorage(dbPath string) (*Storage, error) {
 		}
 
 		// Migrate from legacy storage if it exists
-		if err := s.migrateFromLegacy(); err != nil {
-			log.Warn().Err(err).Msg("Legacy storage migration failed")
-		} else {
-			log.Info().Msg("Legacy storage migration completed successfully")
-		}
+		s.migrateFromLegacy()
 	}()
 
 	return s, nil
@@ -177,31 +173,31 @@ func (s *Storage) GetMigrationStatus() (*SystemMigrationStatus, error) {
 	return ProtoToSystemMigrationStatus(&pb), nil
 }
 
-func (s *Storage) migrateFromLegacy() error {
+func (s *Storage) migrateFromLegacy() {
 	// Check if decypharr.db folder exists (legacy storage)
-	legacyPath := filepath.Join(s.dir, "decypharr.db")
+	legacyPath := filepath.Join(filepath.Dir(s.dir), "decypharr.db")
 	if _, err := os.Stat(legacyPath); os.IsNotExist(err) {
-		return nil // No legacy data, nothing to migrate
+		return
 	}
 
 	// Create a new storage instance for the legacy data
 	legacyStorage, err := NewStorage(legacyPath)
 	if err != nil {
-		return fmt.Errorf("failed to open legacy storage: %w", err)
+		return
 	}
 	defer legacyStorage.Close()
 
 	// Copy data from legacy storage to new storage
 	if err := s.copyFrom(legacyStorage); err != nil {
-		return fmt.Errorf("failed to copy data from legacy storage: %w", err)
+		return
 	}
 
 	// Delete legacy storage directory after successful migration
 	if err := os.RemoveAll(legacyPath); err != nil {
-		return fmt.Errorf("failed to remove legacy storage: %w", err)
+		return
 	}
 
-	return nil
+	return
 }
 
 func (s *Storage) copyFrom(other *Storage) error {

@@ -167,6 +167,8 @@ type downloader struct {
 	maxChunkSize     int64
 
 	wg sync.WaitGroup
+
+	idleTimer *time.Timer
 }
 
 // NewDownloaders creates a new download coordinator
@@ -778,12 +780,23 @@ func (dl *downloader) getState() (start, targetEnd, chunkSize, fileSize int64, s
 
 // waitForWork blocks until new work arrives or timeout
 func (dl *downloader) waitForWork() bool {
+	if dl.idleTimer == nil {
+		dl.idleTimer = time.NewTimer(maxDownloaderIdleTime)
+	} else {
+		if !dl.idleTimer.Stop() {
+			select {
+			case <-dl.idleTimer.C:
+			default:
+			}
+		}
+		dl.idleTimer.Reset(maxDownloaderIdleTime)
+	}
 	select {
 	case <-dl.quit:
 		return false
 	case <-dl.kick:
 		return true
-	case <-time.After(maxDownloaderIdleTime):
+	case <-dl.idleTimer.C:
 		return false
 	}
 }
