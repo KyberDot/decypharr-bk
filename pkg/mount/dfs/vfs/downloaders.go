@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -32,58 +31,7 @@ const (
 	idleTimeout = 30 * time.Second
 	// circuitCooldownDuration is how long to block requests after max errors reached
 	circuitCooldownDuration = 20 * time.Minute
-	// maxChunkDoublings bounds sequential chunk growth (2^6 = 64x)
-	maxChunkDoublings = 6
-
-	// sequentialThreshold is how many consecutive sequential reads
-	// before enabling aggressive read-ahead
-	sequentialThreshold = 3
-	// sequentialGap is the max gap between reads to still be considered sequential
-	sequentialGap = 64 * 1024 // 64KB (kernel read-ahead alignment)
-	// minReadForPrefetch - don't prefetch for tiny reads (likely probing)
-	minReadForPrefetch = 64 * 1024 // 64KB
 )
-
-// accessPattern tracks read patterns to detect sequential vs random access
-type accessPattern struct {
-	mu              sync.Mutex
-	lastOffset      int64
-	lastSize        int64
-	sequentialCount int
-	confirmed       bool
-}
-
-func (ap *accessPattern) record(offset, size int64) {
-	ap.mu.Lock()
-	defer ap.mu.Unlock()
-
-	if ap.confirmed {
-		return // Already confirmed, no need to track
-	}
-
-	if ap.lastSize > 0 {
-		expected := ap.lastOffset + ap.lastSize
-		// Sequential: current read starts at or near where last read ended
-		if offset >= ap.lastOffset && offset <= expected+sequentialGap {
-			ap.sequentialCount++
-			if ap.sequentialCount >= sequentialThreshold {
-				ap.confirmed = true
-			}
-		} else {
-			// Non-sequential (backward seek or large jump)
-			ap.sequentialCount = 0
-		}
-	}
-
-	ap.lastOffset = offset
-	ap.lastSize = size
-}
-
-func (ap *accessPattern) isSequential() bool {
-	ap.mu.Lock()
-	defer ap.mu.Unlock()
-	return ap.confirmed
-}
 
 // Downloaders coordinates multiple concurrent downloads to a cache item
 type Downloaders struct {
@@ -102,8 +50,6 @@ type Downloaders struct {
 	lastErr    error
 	closed     bool
 	wg         sync.WaitGroup
-
-	pattern accessPattern
 
 	// streamID is the active stream registration ID for tracking
 	streamID string
@@ -164,7 +110,6 @@ type downloader struct {
 
 	baseChunkSize    int64
 	currentChunkSize int64
-	maxChunkSize     int64
 
 	wg sync.WaitGroup
 
@@ -225,9 +170,6 @@ func (dls *Downloaders) Download(r ranges.Range) error {
 		dls.ensureKickerRunning()
 	}
 
-	// Record access pattern before taking lock
-	dls.pattern.record(r.Pos, r.Size)
-
 	dls.mu.Lock()
 	if dls.closed {
 		dls.mu.Unlock()
@@ -237,10 +179,8 @@ func (dls *Downloaders) Download(r ranges.Range) error {
 	// Fast path: already have it
 	if dls.item.HasRange(r) {
 		GlobalVFSStats.CacheHits.Add(1)
-		// Proactively ensure upcoming data is being downloaded (only for sequential access)
-		if dls.pattern.isSequential() {
-			dls.ensureBufferWindowLocked(r)
-		}
+		// Ensure upcoming data is being downloaded to prevent idle timeout
+		dls.ensureDownloaderLocked(r)
 		dls.mu.Unlock()
 		return nil
 	}
@@ -266,7 +206,6 @@ func (dls *Downloaders) Download(r ranges.Range) error {
 	return <-errChan
 }
 
-
 // removeWaiterLocked removes a waiter by its channel (call with lock held)
 func (dls *Downloaders) removeWaiterLocked(errChan chan<- error) {
 	for i, w := range dls.waiters {
@@ -278,16 +217,53 @@ func (dls *Downloaders) removeWaiterLocked(errChan chan<- error) {
 	}
 }
 
-// ensureDownloaderLocked finds or creates a downloader for the range
+// ensureDownloaderLocked finds or creates a downloader for the range.
+// buffer window (readAheadSize) if data is already present. No sequential
+// detection — the downloader idle timeout naturally limits probe waste.
 func (dls *Downloaders) ensureDownloaderLocked(r ranges.Range) error {
-	requested := r
+	// The buffer window is how far ahead we keep data cached
+	bufferWindow := dls.readAheadSize
+	if bufferWindow <= 0 {
+		bufferWindow = dls.chunkSize * 4
+	}
+
 	// Clip to what's missing
 	r = dls.item.FindMissing(r)
-	if r.Size <= 0 {
-		dls.extendSequentialTargetLocked(requested)
-		return nil // Nothing to download
+
+	// If the requested range is already present, check the buffer window
+	startNew := true
+	if r.IsEmpty() {
+		// Extend by buffer window to check if upcoming data needs downloading
+		rWindow := r
+		rWindow.Size += bufferWindow
+		if rWindow.Pos+rWindow.Size > dls.item.info.Size {
+			rWindow.Size = dls.item.info.Size - rWindow.Pos
+		}
+
+		rWindowClipped := dls.item.FindMissing(rWindow)
+		if rWindowClipped.IsEmpty() {
+			// Buffer window is full — just kick existing downloader
+			startNew = false
+			r.Pos = rWindow.Pos + rWindow.Size
+		} else {
+			// Gap in the buffer window — start downloading from there
+			r.Pos = rWindowClipped.Pos
+		}
+		r.Size = 0
 	}
-	targetEnd := dls.initialEnd(r)
+
+	// Nothing to download and no new downloader needed
+	if !startNew && r.Size == 0 {
+		// Still kick an existing downloader to prevent idle timeout
+		dls.kickExistingDownloaderLocked(r.Pos)
+		return nil
+	}
+	if r.Size == 0 {
+		return nil
+	}
+
+	// Target end: download the full missing range
+	targetEnd := r.Pos + r.Size
 
 	// Check error count
 	if dls.errorCount >= maxErrorCount {
@@ -305,8 +281,7 @@ func (dls *Downloaders) ensureDownloaderLocked(r ranges.Range) error {
 		if r.Pos >= start && r.Pos < offset+window {
 			// Extend existing downloader
 			GlobalVFSStats.DownloadersReused.Add(1)
-			sequentialTarget := dls.sequentialEnd(requested)
-			dl.setMaxOffset(sequentialTarget)
+			dl.setMaxOffset(targetEnd)
 			return nil
 		}
 	}
@@ -314,6 +289,22 @@ func (dls *Downloaders) ensureDownloaderLocked(r ranges.Range) error {
 	// Start new downloader
 	GlobalVFSStats.DownloadersCreated.Add(1)
 	return dls.newDownloaderLocked(r, targetEnd)
+}
+
+// kickExistingDownloaderLocked kicks a nearby downloader to prevent idle timeout.
+// Caller must hold dls.mu.
+func (dls *Downloaders) kickExistingDownloaderLocked(pos int64) {
+	window := int64(downloaderWindow)
+	if half := dls.chunkSize / 2; half > window {
+		window = half
+	}
+	for _, dl := range dls.dls {
+		start, offset := dl.getRange()
+		if pos >= start && pos < offset+window {
+			dl.setMaxOffset(offset) // kick without extending
+			return
+		}
+	}
 }
 
 // newDownloaderLocked creates and starts a new downloader
@@ -332,7 +323,6 @@ func (dls *Downloaders) newDownloaderLocked(r ranges.Range, targetEnd int64) err
 		maxOffset:        targetEnd,
 		baseChunkSize:    baseChunk,
 		currentChunkSize: baseChunk,
-		maxChunkSize:     maxChunkSizeFor(baseChunk),
 	}
 
 	dls.dls = append(dls.dls, dl)
@@ -424,113 +414,6 @@ func (dls *Downloaders) kickWaiters() {
 	if fulfilled > 0 {
 		dls.waiterCount.Add(-int32(fulfilled))
 	}
-}
-
-func (dls *Downloaders) initialEnd(r ranges.Range) int64 {
-	// New downloaders always start conservative - just one chunk
-	chunk := dls.chunkSize
-	if chunk <= 0 {
-		chunk = 4 * 1024 * 1024
-	}
-	target := r.Pos + chunk
-	if target > dls.item.info.Size {
-		target = dls.item.info.Size
-	}
-	return target
-}
-
-func (dls *Downloaders) sequentialEnd(r ranges.Range) int64 {
-	chunk := dls.chunkSize
-	if chunk <= 0 {
-		chunk = 4 * 1024 * 1024
-	}
-
-	// Only extend with read-ahead if:
-	// 1. Sequential access pattern is confirmed
-	// 2. Read size suggests streaming (not probing)
-	shouldPrefetch := dls.pattern.isSequential() && r.Size >= minReadForPrefetch
-
-	var ahead int64
-	if shouldPrefetch {
-		ahead = dls.readAheadSize
-		if ahead <= 0 {
-			ahead = chunk * 4 // Default: 4 chunks ahead
-		}
-	} else {
-		ahead = chunk // Conservative: just one chunk
-	}
-
-	target := r.Pos + ahead
-	if target > dls.item.info.Size {
-		target = dls.item.info.Size
-	}
-	return target
-}
-
-func (dls *Downloaders) extendSequentialTargetLocked(r ranges.Range) {
-	window := int64(downloaderWindow)
-	if half := dls.chunkSize / 2; half > window {
-		window = half
-	}
-	for _, dl := range dls.dls {
-		start, offset := dl.getRange()
-		if r.Pos >= start && r.Pos < offset+window {
-			target := dls.sequentialEnd(r)
-			dl.setMaxOffset(target)
-			return
-		}
-	}
-}
-
-// ensureBufferWindowLocked proactively starts/extends a downloader for upcoming
-// data when the current read is a cache hit. This prevents buffer starvation by
-// keeping the read-ahead window populated. Caller must hold dls.mu.
-func (dls *Downloaders) ensureBufferWindowLocked(r ranges.Range) {
-	ahead := dls.readAheadSize
-	if ahead <= 0 {
-		ahead = dls.chunkSize * 4
-	}
-	if ahead <= 0 {
-		return
-	}
-
-	// Check if the upcoming window after this read is cached
-	window := ranges.Range{
-		Pos:  r.Pos + r.Size,
-		Size: ahead,
-	}
-	if window.Pos >= dls.item.info.Size {
-		return
-	}
-	if window.Pos+window.Size > dls.item.info.Size {
-		window.Size = dls.item.info.Size - window.Pos
-	}
-	if window.Size <= 0 {
-		return
-	}
-
-	missing := dls.item.FindMissing(window)
-	if missing.Size <= 0 {
-		return // Window is fully cached
-	}
-
-	// Extend or create a downloader for the missing window
-	_ = dls.ensureDownloaderLocked(window)
-}
-
-func maxChunkSizeFor(base int64) int64 {
-	if base <= 0 {
-		return base
-	}
-
-	maxChunk := base
-	for i := 0; i < maxChunkDoublings; i++ {
-		if maxChunk > math.MaxInt64/2 {
-			return math.MaxInt64
-		}
-		maxChunk *= 2
-	}
-	return maxChunk
 }
 
 // Close stops all downloaders and returns unfulfilled waiters with error
@@ -998,13 +881,10 @@ func (dl *downloader) adjustChunkSize(chunkLen, written int64, success bool) {
 		return
 	}
 
-	// Double chunk size on successful download
+	// Double chunk size on successful download to quickly ramp up on good connections, but reset to base size on failures.
 	next := dl.currentChunkSize * 2
 	if next <= 0 {
 		next = dl.baseChunkSize
-	}
-	if next > dl.maxChunkSize {
-		next = dl.maxChunkSize
 	}
 	dl.currentChunkSize = next
 }
