@@ -102,6 +102,18 @@ func (e *Entry) IsNZB() bool {
 	return e.Protocol == config.ProtocolNZB
 }
 
+func (e *Entry) Validate() error {
+	activeProvider := e.GetActiveProvider()
+	if activeProvider == nil {
+		return fmt.Errorf("no active providerEntry")
+	}
+	// Check if active providerEntry is completed
+	if len(activeProvider.Files) == 0 {
+		return fmt.Errorf("no files in active providerEntry")
+	}
+	return nil
+}
+
 // CanBeFixed checks if the entry can be repaired
 // TODO: Add more checks later. This will be done when we add other NZB source like TB(nzb)
 func (e *Entry) CanBeFixed() bool {
@@ -207,19 +219,6 @@ func (p *ProviderEntry) NeedsUpdate(remote *debridTypes.Torrent) bool {
 
 	if len(p.Files) == 0 {
 		return true
-	}
-	remoteFiles := remote.GetFiles()
-	if len(p.Files) != len(remoteFiles) {
-		return true // File count changed
-	}
-	for _, rf := range remoteFiles {
-		pf, exists := p.Files[rf.Name]
-		if !exists {
-			return true // New file appeared
-		}
-		if pf.Link == "" && rf.Link != "" {
-			return true // Link became available
-		}
 	}
 	return false
 }
