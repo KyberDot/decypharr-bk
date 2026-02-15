@@ -45,7 +45,6 @@ const (
 	refreshMinWorkers      = 5
 	refreshDeleteWorkers   = 10
 	refreshWorkChanBuffer  = 100
-	refreshBatchChanBuffer = 50
 )
 
 // refreshTorrents refreshes torrents from a specific debrid service.
@@ -212,20 +211,11 @@ func (m *Manager) handleTorrentDeletions(torrentsToDelete []string) {
 // processNewTorrents processes new torrents with worker pool and batch writing
 func (m *Manager) processNewTorrents(provider string, newTorrents []*types.Torrent) error {
 	workChan := make(chan *types.Torrent, min(refreshWorkChanBuffer, len(newTorrents)))
-	batchChan := make(chan *storage.Entry, refreshBatchChanBuffer)
 	errChan := make(chan error, 1) // Buffer for first error
 
 	var processWg sync.WaitGroup
-	var batchWg sync.WaitGroup
 	var processed atomic.Int64
 	totalTorrents := len(newTorrents)
-
-	// Batch writer goroutine
-	batchWg.Add(1)
-	go func() {
-		defer batchWg.Done()
-		m.runBatchWriter(batchChan, errChan)
-	}()
 
 	// Scale workers based on torrent count, but cap to avoid overwhelming APIs
 	workers := min(refreshMaxWorkers, max(refreshMinWorkers, len(newTorrents)/10))
@@ -238,7 +228,7 @@ func (m *Manager) processNewTorrents(provider string, newTorrents []*types.Torre
 				if mt, err := m.processSyncTorrent(t); err != nil {
 					m.logger.Error().Err(err).Str("debrid", provider).Msgf("Failed to process torrent %s", t.Id)
 				} else if mt != nil {
-					batchChan <- mt
+					_ = m.storage.AddOrUpdate(mt) // Write directly to storage - it will handle batching internally
 				}
 				count := processed.Add(1)
 				if count%50 == 0 {
@@ -255,8 +245,6 @@ func (m *Manager) processNewTorrents(provider string, newTorrents []*types.Torre
 
 	close(workChan)
 	processWg.Wait()
-	close(batchChan)
-	batchWg.Wait()
 
 	// Check if batch writer encountered an error
 	select {
@@ -264,50 +252,6 @@ func (m *Manager) processNewTorrents(provider string, newTorrents []*types.Torre
 		return err
 	default:
 		return nil
-	}
-}
-
-// runBatchWriter collects entries and writes them in batches
-func (m *Manager) runBatchWriter(batchChan <-chan *storage.Entry, errChan chan<- error) {
-	batch := make([]*storage.Entry, 0, refreshWriteBatchSize)
-	ticker := time.NewTicker(refreshFlushInterval)
-	defer ticker.Stop()
-
-	var writeErr error
-	flushBatch := func() {
-		if len(batch) == 0 || writeErr != nil {
-			return
-		}
-		if err := m.storage.BatchAddOrUpdate(batch); err != nil {
-			m.logger.Error().Err(err).Msg("Failed to batch write remote")
-			writeErr = err
-			// Send first error to channel (non-blocking)
-			select {
-			case errChan <- err:
-			default:
-			}
-		}
-		// Clear slice
-		for i := range batch {
-			batch[i] = nil
-		}
-		batch = batch[:0]
-	}
-
-	for {
-		select {
-		case t, ok := <-batchChan:
-			if !ok {
-				flushBatch()
-				return
-			}
-			batch = append(batch, t)
-			if len(batch) >= refreshWriteBatchSize {
-				flushBatch()
-			}
-		case <-ticker.C:
-			flushBatch()
-		}
 	}
 }
 
@@ -322,8 +266,6 @@ func (m *Manager) processSyncTorrent(t *types.Torrent) (*storage.Entry, error) {
 	// Check if files are complete - only make API call if needed
 	needsUpdate := len(t.Files) == 0 || !isComplete(t.Files)
 	if needsUpdate {
-		// This is the main bottleneck - API call per torrent
-		// Consider: Could we batch UpdateTorrent calls? Depends on debrid API
 		if err := client.UpdateTorrent(t); err != nil {
 			return nil, err
 		}
