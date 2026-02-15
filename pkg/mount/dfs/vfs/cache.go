@@ -156,7 +156,12 @@ func (c *Cache) scanDiskCandidates() ([]candidateEntry, int64) {
 
 		// Skip non-files and non-meta.json files
 		if d.IsDir() {
-			return nil
+			// If it's an empty directory, remove it
+			entries, err := os.ReadDir(path)
+			if err == nil && len(entries) == 0 {
+				_ = os.Remove(path)
+				return nil
+			}
 		}
 		if d.Name() != "meta.json" {
 			return nil
@@ -210,11 +215,8 @@ func (c *Cache) scanDiskCandidates() ([]candidateEntry, int64) {
 			return nil
 		}
 
-		// Calculate actual cached bytes from downloaded ranges
-		cachedSize := info.Rs.Size()
-		if cachedSize <= 0 && info.Size > 0 {
-			cachedSize = dataStat.Size()
-		}
+		// Let's use the actual size on disk as the cached size, since the metadata size may be larger than what's actually present (especially if the file was truncated or not fully downloaded)
+		cachedSize := dataStat.Size()
 
 		// Set default times if missing
 		atime := info.ATime
