@@ -492,6 +492,9 @@ type CacheItem struct {
 	metaFlushCh chan struct{}
 	metaStopCh  chan struct{}
 	metaWG      sync.WaitGroup
+
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func (item *CacheItem) startMetaWriter() {
@@ -723,26 +726,32 @@ func (item *CacheItem) FindMissing(r ranges.Range) ranges.Range {
 
 // Close closes the cache item and saves metadata
 func (item *CacheItem) Close() error {
-	// Stop downloaders without holding the downloaders lock to avoid deadlocks.
-	item.dlMu.Lock()
-	dls := item.downloaders
-	item.downloaders = nil
-	item.dlMu.Unlock()
+	item.closeOnce.Do(func() {
+		// Stop downloaders without holding the downloaders lock to avoid deadlocks.
+		item.dlMu.Lock()
+		dls := item.downloaders
+		item.downloaders = nil
+		item.dlMu.Unlock()
 
-	if dls != nil {
-		dls.Close(nil)
-	}
+		if dls != nil {
+			if err := dls.Close(nil); err != nil && item.closeErr == nil {
+				item.closeErr = err
+			}
+		}
 
-	item.stopMetaWriter()
-	item.flushMetadata(true)
+		item.stopMetaWriter()
+		item.flushMetadata(true)
 
-	item.fileMu.Lock()
-	if item.file != nil {
-		item.file.Close()
-		item.file = nil
-	}
-	item.fileMu.Unlock()
-	return nil
+		item.fileMu.Lock()
+		if item.file != nil {
+			if err := item.file.Close(); err != nil && item.closeErr == nil {
+				item.closeErr = err
+			}
+			item.file = nil
+		}
+		item.fileMu.Unlock()
+	})
+	return item.closeErr
 }
 
 // Helper functions

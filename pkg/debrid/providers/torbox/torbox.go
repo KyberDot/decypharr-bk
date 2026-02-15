@@ -718,3 +718,8 @@ func (tb *Torbox) SpeedTest(ctx context.Context) types.SpeedTestResult {
 
 	return result
 }
+
+
+func (tb *Torbox) SupportsCheck() bool {
+	return false
+}

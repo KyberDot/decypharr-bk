@@ -733,3 +733,7 @@ func (dl *DebridLink) SpeedTest(ctx context.Context) types.SpeedTestResult {
 
 	return result
 }
+
+func (dl *DebridLink) SupportsCheck() bool {
+	return false
+}

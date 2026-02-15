@@ -16,6 +16,7 @@ import (
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/arr"
 	"github.com/sirrobot01/decypharr/pkg/manager"
+	repairpkg "github.com/sirrobot01/decypharr/pkg/repair"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	"github.com/sirrobot01/decypharr/pkg/version"
 	"github.com/sourcegraph/conc/iter"
@@ -218,24 +219,46 @@ func (s *Server) handleRepairMedia(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var arrs []string
-	if req.ArrName != "" {
-		_arr := s.manager.Arr().Get(req.ArrName)
-		if _arr == nil {
-			http.Error(w, "No arrs found to repair", http.StatusNotFound)
-			return
-		}
-		arrs = append(arrs, req.ArrName)
+	scope := strings.TrimSpace(strings.ToLower(req.Scope))
+	if scope == "" {
+		scope = "arr"
 	}
 
-	if err := s.manager.Repair().AddJob(arrs, req.MediaIds, req.AutoProcess, false); err != nil {
+	var arrs []string
+	switch scope {
+	case "arr":
+		if req.ArrName != "" {
+			_arr := s.manager.Arr().Get(req.ArrName)
+			if _arr == nil {
+				http.Error(w, "No arrs found to repair", http.StatusNotFound)
+				return
+			}
+			arrs = append(arrs, req.ArrName)
+		}
+	case "managed_entries":
+		arrs = []string{repairpkg.ScopeManagedEntries}
+	default:
+		http.Error(w, "Invalid repair scope", http.StatusBadRequest)
+		return
+	}
+
+	autoProcess := req.AutoProcess
+	switch req.Mode {
+	case string(storage.RepairModeDetectOnly):
+		autoProcess = false
+	case string(storage.RepairModeDetectAndRepair):
+		autoProcess = true
+	}
+
+	jobID, err := s.manager.Repair().AddJob(arrs, req.MediaIds, autoProcess, false)
+	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to repair: %v", err), http.StatusInternalServerError)
 		return
 	}
 
 	utils.JSONResponse(w, map[string]string{
 		"message": "Repair job started successfully",
-		"job_id":  "job-started",
+		"job_id":  jobID,
 	}, http.StatusOK)
 }
 

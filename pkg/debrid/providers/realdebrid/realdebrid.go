@@ -1148,3 +1148,8 @@ func (r *RealDebrid) SpeedTest(ctx context.Context) types.SpeedTestResult {
 
 	return result
 }
+
+
+func (r *RealDebrid) SupportsCheck() bool {
+	return true
+}

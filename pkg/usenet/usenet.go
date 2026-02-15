@@ -438,6 +438,12 @@ func (u *Usenet) checkFileAvailability(ctx context.Context, file *storage.NZBFil
 	// Check if all sampled segments are available
 	if !result.AllAvailable() {
 		// if even one segment is missing, mark file as unavailable
+		u.logger.Warn().
+			Str("file", file.Name).
+			Int("total_segments", len(file.Segments)).
+			Int("available_segments", result.FoundCount).
+			Int("missing_segments", result.TotalCount-result.FoundCount).
+			Msg("File is unavailable - one or more segments are missing")
 		return customerror.UsenetSegmentMissingError
 	}
 
@@ -574,7 +580,6 @@ type StreamSession struct {
 func (s *StreamSession) FileSize() int64 {
 	return s.fileSize
 }
-
 
 // Stream streams a file using the new streaming system with caching and worker limiting
 func (u *Usenet) Stream(ctx context.Context, nzoID, filename string, start, end int64, writer io.Writer) error {

@@ -35,6 +35,7 @@ const (
 
 // Downloaders coordinates multiple concurrent downloads to a cache item
 type Downloaders struct {
+	parentCtx     context.Context
 	ctx           context.Context
 	cancel        context.CancelFunc
 	item          *CacheItem
@@ -118,7 +119,8 @@ type downloader struct {
 
 // NewDownloaders creates a new download coordinator
 func NewDownloaders(ctx context.Context, mgr *manager.Manager, item *CacheItem, cfg *fuseconfig.FuseConfig) *Downloaders {
-	ctx, cancel := context.WithCancel(ctx)
+	parentCtx := ctx
+	ctx, cancel := context.WithCancel(parentCtx)
 	chunkSize := cfg.ChunkSize
 	if chunkSize <= 0 {
 		chunkSize = 4 * 1024 * 1024
@@ -133,6 +135,7 @@ func NewDownloaders(ctx context.Context, mgr *manager.Manager, item *CacheItem, 
 	}
 
 	dls := &Downloaders{
+		parentCtx:     parentCtx,
 		ctx:           ctx,
 		cancel:        cancel,
 		item:          item,
@@ -156,7 +159,11 @@ func (dls *Downloaders) Download(r ranges.Range) error {
 	// Circuit breaker: reject immediately if circuit is open
 	if dls.isCircuitOpen() {
 		GlobalVFSStats.CircuitRejects.Add(1)
-		return fmt.Errorf("circuit breaker open, cooldown active: last error: %w", dls.lastErr)
+		lastErr := dls.getLastErr()
+		if lastErr == nil {
+			return errors.New("circuit breaker open, cooldown active")
+		}
+		return fmt.Errorf("circuit breaker open, cooldown active: last error: %w", lastErr)
 	}
 
 	dls.ensureStreamTracked()
@@ -217,6 +224,12 @@ func (dls *Downloaders) removeWaiterLocked(errChan chan<- error) {
 	}
 }
 
+func (dls *Downloaders) getLastErr() error {
+	dls.mu.Lock()
+	defer dls.mu.Unlock()
+	return dls.lastErr
+}
+
 // ensureDownloaderLocked finds or creates a downloader for the range.
 // buffer window (readAheadSize) if data is already present. No sequential
 // detection — the downloader idle timeout naturally limits probe waste.
@@ -267,6 +280,9 @@ func (dls *Downloaders) ensureDownloaderLocked(r ranges.Range) error {
 
 	// Check error count
 	if dls.errorCount >= maxErrorCount {
+		if dls.lastErr == nil {
+			return fmt.Errorf("too many errors (%d)", dls.errorCount)
+		}
 		return fmt.Errorf("too many errors (%d): last error: %w", dls.errorCount, dls.lastErr)
 	}
 
@@ -419,21 +435,31 @@ func (dls *Downloaders) kickWaiters() {
 // Close stops all downloaders and returns unfulfilled waiters with error
 func (dls *Downloaders) Close(inErr error) error {
 	dls.mu.Lock()
+	if dls.closed {
+		dls.mu.Unlock()
+		return nil
+	}
 	dls.closed = true
 	dls.untrackStreamLocked()
 
+	// Copy slice before unlocking to avoid races while waiting.
+	dlsCopy := make([]*downloader, len(dls.dls))
+	copy(dlsCopy, dls.dls)
+
 	// Stop all downloaders
-	for _, dl := range dls.dls {
+	for _, dl := range dlsCopy {
 		dl.stop()
 	}
 	dls.mu.Unlock()
 
+	// Cancel first so any blocked stream operation can exit promptly.
+	dls.cancel()
+
 	// Wait for downloaders to finish
-	for _, dl := range dls.dls {
+	for _, dl := range dlsCopy {
 		dl.wg.Wait()
 	}
 
-	dls.cancel()
 	dls.wg.Wait()
 
 	// Close remaining waiters
@@ -552,6 +578,10 @@ func (dls *Downloaders) checkIdleTimeout() bool {
 // for potential reuse. This is called when all file handles are closed.
 func (dls *Downloaders) StopAll() {
 	dls.mu.Lock()
+	if dls.closed {
+		dls.mu.Unlock()
+		return
+	}
 	dls.untrackStreamLocked()
 
 	// Copy slice before unlocking to avoid race during Wait
@@ -564,12 +594,23 @@ func (dls *Downloaders) StopAll() {
 	}
 	dls.dls = nil
 	dls.idle.Store(true)
+	oldCancel := dls.cancel
 	dls.mu.Unlock()
+
+	// Cancel active context so in-flight Stream calls can be interrupted.
+	oldCancel()
 
 	// Wait for them to finish (using copy, safe to iterate without lock)
 	for _, dl := range dlsCopy {
 		dl.wg.Wait()
 	}
+	dls.wg.Wait()
+
+	dls.mu.Lock()
+	if !dls.closed {
+		dls.ctx, dls.cancel = context.WithCancel(dls.parentCtx)
+	}
+	dls.mu.Unlock()
 }
 
 // ensureKickerRunning restarts the kicker goroutine if it has stopped
@@ -591,6 +632,7 @@ func (dls *Downloaders) ensureKickerRunning() {
 // waiters and handles idle timeout. The primary notification path is direct
 // kickWaiters() calls from cacheWriter.Write(); this ticker is only a fallback.
 func (dls *Downloaders) startKicker() {
+	ctx := dls.ctx
 	dls.kickerDone = make(chan struct{})
 	dls.wg.Add(1)
 	go func() {
@@ -607,7 +649,7 @@ func (dls *Downloaders) startKicker() {
 				if dls.checkIdleTimeout() {
 					return
 				}
-			case <-dls.ctx.Done():
+			case <-ctx.Done():
 				return
 			}
 		}

@@ -204,6 +204,10 @@ func (p *ProviderEntry) NeedsUpdate(remote *debridTypes.Torrent) bool {
 	if p.Status != remote.Status {
 		return true // Status changed (e.g., downloading → downloaded)
 	}
+
+	if len(p.Files) == 0 {
+		return true
+	}
 	remoteFiles := remote.GetFiles()
 	if len(p.Files) != len(remoteFiles) {
 		return true // File count changed

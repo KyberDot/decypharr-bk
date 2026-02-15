@@ -38,7 +38,7 @@ func (s *Server) handleTautulli(w http.ResponseWriter, r *http.Request) {
 	}
 
 	mediaId := cmp.Or(payload.TmdbID, payload.TvdbID)
-	if err := s.manager.Repair().AddJob([]string{}, []string{mediaId}, payload.AutoProcess, false); err != nil {
+	if _, err := s.manager.Repair().AddJob([]string{}, []string{mediaId}, payload.AutoProcess, false); err != nil {
 		http.Error(w, "Failed to add job: "+err.Error(), http.StatusInternalServerError)
 		return
 	}

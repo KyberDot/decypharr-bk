@@ -19,66 +19,64 @@
 
             <form id="repairForm" class="space-y-6">
                 <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    <div class="space-y-4">
-                        <!-- Arr Selection -->
-                        <div>
-                            <label class="label" for="arrSelect">
+                    <div>
+                        <label class="label" for="repairScope">
+                                <span class="label-text font-semibold">
+                                    <i class="bi bi-filter-square mr-2 text-info"></i>Detection Scope
+                                </span>
+                        </label>
+                        <select class="select w-full" id="repairScope">
+                            <option value="arr" selected>Arr Media</option>
+                            <option value="managed_entries">Managed Entries (No Arr)</option>
+                        </select>
+                        <span class="text-sm opacity-70" id="repairScopeDescription">
+                                Arr media scope discovers files through Arr-managed library items.
+                            </span>
+                    </div>
+
+                    <!-- Arr Selection -->
+                    <div>
+                        <label class="label" for="arrSelect">
                                 <span class="label-text font-semibold">
                                     <i class="bi bi-collection mr-2 text-secondary"></i>Arr Instance
                                 </span>
-                            </label>
-                            <select class="select w-full" id="arrSelect">
-                                <option value="">Select an Arr instance</option>
-                            </select>
-                            <span class="text-sm opacity-70">Choose which Arr service to repair</span>
-                        </div>
+                        </label>
+                        <select class="select w-full" id="arrSelect">
+                            <option value="">Select an Arr instance</option>
+                        </select>
+                        <span class="text-sm opacity-70" id="arrHelpText">Choose which Arr service to repair</span>
+                    </div>
 
-                        <div class="mt-4">
-                            <label class="label" for="mediaIds">
+                    <div>
+                        <label class="label" for="mediaIds">
                                 <span class="label-text font-semibold">
                                     <i class="bi bi-hash mr-2 text-accent"></i>Media IDs
                                 </span>
-                                <span class="text-sm opacity-70">Optional</span>
-                            </label>
-                            <input type="text" class="input w-full" id="mediaIds" placeholder="123, 456, 789">
-                            <span class="text-sm opacity-70">
+                            <span class="text-sm opacity-70">Optional</span>
+                        </label>
+                        <input type="text" class="input w-full" id="mediaIds" placeholder="123, 456, 789">
+                        <span class="text-sm opacity-70" id="mediaHelpText">
                                 Enter specific TV DB IDs (Sonarr) or TM DB IDs (Radarr), comma-separated. Leave empty
                                 for all media.
                             </span>
-                        </div>
                     </div>
-
-                    <div class="space-y-4">
-                        <div class="space-y-3">
-                            <label class="label">
-                                <span class="label-text font-semibold">
-                                    <i class="bi bi-sliders mr-2 text-info"></i>Repair Options
-                                </span>
-                            </label>
-                            <div class="space-y-3">
-                                <div>
-                                    <label class="label cursor-pointer justify-start gap-3">
-                                        <input type="checkbox" class="checkbox checkbox-lg checkbox-error"
-                                            id="autoProcess">
-                                        <div>
-                                            <span class="label-text font-medium">Auto Process</span>
-                                            <div class="label-text-alt text-error">
-                                                <i class="bi bi-exclamation-triangle mr-1"></i>
-                                                <span id="autoProcessDescription">Automatically delete broken symlinks
-                                                    and re-search media</span>
-                                            </div>
-                                        </div>
-                                    </label>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div>
-                            <button type="submit" class="btn btn-primary btn-lg w-full" id="submitRepair">
-                                <i class="bi bi-wrench mr-2"></i>Start Repair
-                            </button>
-                        </div>
+                    <div>
+                        <label class="label" for="repairMode">
+                            <span class="label-text font-medium">Run Mode</span>
+                        </label>
+                        <select class="select w-full" id="repairMode">
+                            <option value="detect_only">Detect Only</option>
+                            <option value="detect_and_repair">Detect And Repair</option>
+                        </select>
+                        <span class="text-sm opacity-70" id="repairModeDescription">
+                                        Detect-only scans and reports broken files without changing anything.
+                                    </span>
                     </div>
+                </div>
+                <div>
+                    <button type="submit" class="btn btn-primary btn-lg ml-auto" id="submitRepair">
+                        <i class="bi bi-wrench mr-2"></i>Start Repair
+                    </button>
                 </div>
             </form>
         </div>
@@ -126,7 +124,13 @@
                                 <i class="bi bi-activity mr-2"></i>Status
                             </th>
                             <th class="font-semibold">
-                                <i class="bi bi-exclamation-triangle mr-2"></i>Broken Items
+                                <i class="bi bi-diagram-3 mr-2"></i>Stage
+                            </th>
+                            <th class="font-semibold">
+                                <i class="bi bi-toggle-on mr-2"></i>Mode
+                            </th>
+                            <th class="font-semibold">
+                                <i class="bi bi-bar-chart mr-2"></i>Stats
                             </th>
                             <th class="font-semibold w-32">Actions</th>
                         </tr>
@@ -180,6 +184,10 @@
                                 <span id="modalJobStatus">-</span>
                             </div>
                             <div class="flex justify-between">
+                                <span class="font-medium">Stage:</span>
+                                <span id="modalJobStage">-</span>
+                            </div>
+                            <div class="flex justify-between">
                                 <span class="font-medium">Started:</span>
                                 <span id="modalJobStarted">-</span>
                             </div>
@@ -204,6 +212,10 @@
                                 <span id="modalJobMediaIds">-</span>
                             </div>
                             <div class="flex justify-between">
+                                <span class="font-medium">Mode:</span>
+                                <span id="modalJobMode">-</span>
+                            </div>
+                            <div class="flex justify-between">
                                 <span class="font-medium">Auto Process:</span>
                                 <span id="modalJobAutoProcess">-</span>
                             </div>
@@ -217,6 +229,71 @@
                 <div>
                     <strong>Error:</strong>
                     <span id="modalJobError">-</span>
+                </div>
+            </div>
+
+            <div class="card bg-base-200">
+                <div class="card-body">
+                    <h4 class="card-title text-lg mb-4">Run Stats</h4>
+                    <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                        <div class="stat bg-base-100 rounded-box p-3">
+                            <div class="stat-title text-xs">Discovered</div>
+                            <div class="stat-value text-lg" id="modalStatDiscovered">0</div>
+                        </div>
+                        <div class="stat bg-base-100 rounded-box p-3">
+                            <div class="stat-title text-xs">Probed</div>
+                            <div class="stat-value text-lg" id="modalStatProbed">0</div>
+                        </div>
+                        <div class="stat bg-base-100 rounded-box p-3">
+                            <div class="stat-title text-xs">Broken</div>
+                            <div class="stat-value text-lg text-error" id="modalStatBroken">0</div>
+                        </div>
+                        <div class="stat bg-base-100 rounded-box p-3">
+                            <div class="stat-title text-xs">Unknown</div>
+                            <div class="stat-value text-lg" id="modalStatUnknown">0</div>
+                        </div>
+                        <div class="stat bg-base-100 rounded-box p-3">
+                            <div class="stat-title text-xs">Planned</div>
+                            <div class="stat-value text-lg" id="modalStatPlanned">0</div>
+                        </div>
+                        <div class="stat bg-base-100 rounded-box p-3">
+                            <div class="stat-title text-xs">Executed</div>
+                            <div class="stat-value text-lg" id="modalStatExecuted">0</div>
+                        </div>
+                        <div class="stat bg-base-100 rounded-box p-3">
+                            <div class="stat-title text-xs">Fixed</div>
+                            <div class="stat-value text-lg text-success" id="modalStatFixed">0</div>
+                        </div>
+                        <div class="stat bg-base-100 rounded-box p-3">
+                            <div class="stat-title text-xs">Failed</div>
+                            <div class="stat-value text-lg text-warning" id="modalStatFailed">0</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card bg-base-200">
+                <div class="card-body">
+                    <h4 class="card-title text-lg mb-4">Actions</h4>
+                    <div class="overflow-x-auto border border-base-300 rounded-lg max-h-64">
+                        <table class="table table-sm table-hover">
+                            <thead class="sticky top-0 bg-base-300">
+                                <tr>
+                                    <th class="font-semibold">Type</th>
+                                    <th class="font-semibold">Protocol</th>
+                                    <th class="font-semibold">Entry</th>
+                                    <th class="font-semibold">Status</th>
+                                    <th class="font-semibold">Started</th>
+                                    <th class="font-semibold">Finished</th>
+                                    <th class="font-semibold">Error</th>
+                                </tr>
+                            </thead>
+                            <tbody id="actionItemsTableBody"></tbody>
+                        </table>
+                    </div>
+                    <div id="noActionsMessage" class="text-center py-6 hidden text-base-content/70">
+                        No planned actions for this run.
+                    </div>
                 </div>
             </div>
 

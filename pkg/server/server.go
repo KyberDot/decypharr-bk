@@ -59,8 +59,9 @@ type RepairRequest struct {
 	ArrName       string   `json:"arr"`
 	MediaIds      []string `json:"mediaIds"`
 	AutoProcess   bool     `json:"autoProcess"`
-	Mode          string   `json:"mode"`          // "arr" or "all"
-	TorrentFilter string   `json:"torrentFilter"` // Optional filter for torrent name/infohash in "all" mode
+	Mode          string   `json:"mode"`          // "detect_only" or "detect_and_repair"
+	Scope         string   `json:"scope"`         // "arr" or "managed_entries"
+	TorrentFilter string   `json:"torrentFilter"` // reserved for future scoped repair filtering
 }
 
 type Server struct {

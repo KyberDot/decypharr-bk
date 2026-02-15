@@ -58,7 +58,7 @@ func (f *StreamingFile) Size() int64 {
 // Close closes the file handle
 func (f *StreamingFile) Close() error {
 	if f.closed.Swap(true) {
-		return errors.New("already closed")
+		return nil
 	}
 	f.item.Release() // Decrement opens count
 	GlobalVFSStats.FilesClosed.Add(1)

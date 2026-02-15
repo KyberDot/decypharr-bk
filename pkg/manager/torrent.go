@@ -152,8 +152,11 @@ func (m *Manager) detectTorrentChanges(provider string, remoteTorrentsByHash map
 						torrentsToUpdate = append(torrentsToUpdate, entry)
 					}
 				} else if oldPlacement.NeedsUpdate(currentTorrent) {
-					entry.AddTorrentProvider(currentTorrent)
-					torrentsToUpdate = append(torrentsToUpdate, entry)
+					// currentTorrent has changes for this provider - update placement info
+					// But the issue is that currentTorrent may not have all the metadata we need to update the placement (e.g. downloadedAt, files etc)
+					// So we need to fetch the full torrent info from debrid to ensure we have all the metadata to update the placement correctly
+					// So let's just add it to the newTorrents list and let processNewTorrents handle the update logic - it will be smart enough to only update the placement info without overwriting other metadata
+					newTorrents = append(newTorrents, currentTorrent)
 				}
 			} else if onRemote {
 				newTorrents = append(newTorrents, currentTorrent)
@@ -434,7 +437,17 @@ func (m *Manager) refreshTorrent(infohash string) (*storage.Entry, error) {
 		return nil, err
 	}
 
-	return m.processSyncTorrent(debridTorrent)
+	entry, err := m.processSyncTorrent(debridTorrent)
+	if err != nil {
+		return nil, err
+	}
+	// Store updated entry in storage
+	if entry != nil {
+		if err := m.storage.AddOrUpdate(entry); err != nil {
+			return nil, err
+		}
+	}
+	return entry, nil
 }
 
 // refreshDebridDownloadLinks refreshes download links for a specific debrid service

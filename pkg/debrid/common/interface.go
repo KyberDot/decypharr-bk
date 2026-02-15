@@ -28,4 +28,5 @@ type Client interface {
 	SyncAccounts() // Updates each accounts details(like traffic, username, etc.)
 	DeleteLink(dl types.DownloadLink) error
 	SpeedTest(ctx context.Context) types.SpeedTestResult
+	SupportsCheck() bool
 }
