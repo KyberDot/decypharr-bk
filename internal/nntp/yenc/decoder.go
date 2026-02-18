@@ -23,7 +23,7 @@ type Metadata struct {
 }
 
 // UsePureGo forces the pure-Go yEnc decoder even when CGO/rapidyenc is available.
-var UsePureGo bool = true
+var UsePureGo bool = false
 
 // Decoder wraps an io.Reader that decodes yEnc-encoded data on the fly.
 // After reading, Meta contains the parsed yEnc header metadata.
