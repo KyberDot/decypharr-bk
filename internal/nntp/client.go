@@ -645,14 +645,47 @@ func (c *Client) reapIdleConnections() {
 	}
 }
 
-// Stats returns current pool statistics
-func (c *Client) Stats() map[string]interface{} {
+// NNTPPoolStats holds aggregate pool statistics.
+type NNTPPoolStats struct {
+	MaxConnections int `json:"max_connections"`
+	TotalCreated   int `json:"total_created"`
+	Active         int `json:"active"`
+	Idle           int `json:"idle"`
+}
+
+// NNTPSpeedTestStats holds speed test results for a provider.
+type NNTPSpeedTestStats struct {
+	LatencyMs int64   `json:"latency_ms"`
+	SpeedMBps float64 `json:"speed_mbps"`
+	BytesRead int64   `json:"bytes_read"`
+	TestedAt  string  `json:"tested_at"`
+	Error     string  `json:"error,omitempty"`
+}
+
+// NNTPProviderStats holds per-provider connection stats.
+type NNTPProviderStats struct {
+	Host           string              `json:"host"`
+	Port           int                 `json:"port"`
+	MaxConnections int                 `json:"max_connections"`
+	Active         int                 `json:"active"`
+	Idle           int                 `json:"idle"`
+	SSL            bool                `json:"ssl"`
+	SpeedTest      *NNTPSpeedTestStats `json:"speed_test,omitempty"`
+}
+
+// NNTPStats holds the complete NNTP client statistics.
+type NNTPStats struct {
+	Pool      NNTPPoolStats       `json:"pool"`
+	Providers []NNTPProviderStats `json:"providers"`
+}
+
+// Stats returns current pool statistics as a typed struct.
+func (c *Client) Stats() *NNTPStats {
 	if c.closed.Load() {
 		return nil
 	}
 
-	stats := make(map[string]interface{})
-	providers := make([]map[string]interface{}, 0, len(c.providers))
+	providers := make([]NNTPProviderStats, 0, len(c.providers))
 
 	totalActive := 0
 	totalIdle := 0
@@ -668,7 +701,6 @@ func (c *Client) Stats() map[string]interface{} {
 		idle := len(pp.conns)
 		pp.mu.Unlock()
 
-		// Active = slots in use (tokens in the semaphore channel)
 		active := len(pp.slots)
 		maxC := pp.max
 
@@ -676,40 +708,37 @@ func (c *Client) Stats() map[string]interface{} {
 		totalIdle += idle
 		totalMax += maxC
 
-		providerInfo := map[string]interface{}{
-			"host":            p.Host,
-			"port":            p.Port,
-			"max_connections": maxC,
-			"active":          active,
-			"idle":            idle,
-			"ssl":             p.SSL,
+		ps := NNTPProviderStats{
+			Host:           p.Host,
+			Port:           p.Port,
+			MaxConnections: maxC,
+			Active:         active,
+			Idle:           idle,
+			SSL:            p.SSL,
 		}
 
-		// Add speed test result if available
 		if result, ok := c.speedTestResults.Load(p.Host); ok {
-			providerInfo["speed_test"] = map[string]interface{}{
-				"latency_ms": result.LatencyMs,
-				"speed_mbps": result.SpeedMBps,
-				"bytes_read": result.BytesRead,
-				"tested_at":  result.TestedAt.Format("2006-01-02T15:04:05Z07:00"),
-				"error":      result.Error,
+			ps.SpeedTest = &NNTPSpeedTestStats{
+				LatencyMs: result.LatencyMs,
+				SpeedMBps: result.SpeedMBps,
+				BytesRead: result.BytesRead,
+				TestedAt:  result.TestedAt.Format("2006-01-02T15:04:05Z07:00"),
+				Error:     result.Error,
 			}
 		}
 
-		providers = append(providers, providerInfo)
+		providers = append(providers, ps)
 	}
 
-	poolStats := map[string]interface{}{
-		"max_connections": totalMax,
-		"total_created":   totalActive + totalIdle,
-		"active":          totalActive,
-		"idle":            totalIdle,
+	return &NNTPStats{
+		Pool: NNTPPoolStats{
+			MaxConnections: totalMax,
+			TotalCreated:   totalActive + totalIdle,
+			Active:         totalActive,
+			Idle:           totalIdle,
+		},
+		Providers: providers,
 	}
-
-	stats["pool"] = poolStats
-	stats["providers"] = providers
-
-	return stats
 }
 
 func (c *Client) Stat(ctx context.Context, messageID string) (int, string, error) {

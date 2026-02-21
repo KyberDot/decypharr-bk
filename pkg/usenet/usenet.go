@@ -782,12 +782,29 @@ func (u *Usenet) PreCache(ctx context.Context, nzoID, filename string) error {
 	return nil
 }
 
+// UsenetStats holds usenet client statistics.
+type UsenetStats struct {
+	Pool       nntp.NNTPPoolStats       `json:"pool"`
+	Providers  []nntp.NNTPProviderStats `json:"providers"`
+	Readers    int                      `json:"readers"`
+	NZBStorage NZBStorageStats          `json:"nzb_storage"`
+}
+
 // Stats returns nntp statistics
-func (u *Usenet) Stats() map[string]interface{} {
-	stats := u.nntp.Stats()
-	stats["readers"] = u.fs.Size()
-	stats["nzb_storage"] = u.nzbStorage.Stats()
-	return stats
+func (u *Usenet) Stats() *UsenetStats {
+	nntpStats := u.nntp.Stats()
+	if nntpStats == nil {
+		return &UsenetStats{
+			Readers:    u.fs.Size(),
+			NZBStorage: u.nzbStorage.Stats(),
+		}
+	}
+	return &UsenetStats{
+		Pool:       nntpStats.Pool,
+		Providers:  nntpStats.Providers,
+		Readers:    u.fs.Size(),
+		NZBStorage: u.nzbStorage.Stats(),
+	}
 }
 
 // GetNZB returns NZB metadata by ID

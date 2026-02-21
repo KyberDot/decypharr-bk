@@ -91,6 +91,7 @@ func (s SegmentState) String() string {
 
 // Config holds configuration for StreamingReader.
 type Config struct {
+
 	// MaxDisk is the maximum disk space to use for segment caching (default: 256MB).
 	MaxDisk int64
 

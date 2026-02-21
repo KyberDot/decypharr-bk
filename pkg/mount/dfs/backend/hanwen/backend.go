@@ -242,20 +242,27 @@ func (b *Backend) forceUnmount() {
 		{"fusermount3", "-uz", b.config.MountPath},
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	for _, method := range methods {
-		if err := b.tryUnmountCommand(method...); err == nil {
+		if err := b.tryUnmountCommand(ctx, method...); err == nil {
+			return
+		}
+		if ctx.Err() != nil {
+			b.logger.Warn().Err(ctx.Err()).Msg("Unmount command timed out")
 			return
 		}
 	}
 }
 
 // tryUnmountCommand tries to run an unmount command
-func (b *Backend) tryUnmountCommand(args ...string) error {
+func (b *Backend) tryUnmountCommand(ctx context.Context, args ...string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("no command provided")
 	}
 
-	cmd := exec.Command(args[0], args[1:]...)
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	return cmd.Run()
 }
 

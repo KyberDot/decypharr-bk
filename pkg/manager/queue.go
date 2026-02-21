@@ -172,7 +172,18 @@ func (q *Queue) DeleteWhere(category string, protocol config.Protocol, state sto
 func (q *Queue) DeleteStalled() error {
 	cutoff := time.Now().Add(-q.removeStalledAfter)
 	return q.storage.DeleteWhereQueued(func(t *storage.Entry) bool {
-		return t.AddedOn.Before(cutoff) && t.Status != debridTypes.TorrentStatusDownloading && t.Seeders == 0 && t.Progress == 0
+		if !t.AddedOn.Before(cutoff) {
+			return false
+		}
+		// Torrent entries: not downloading, no seeders, no progress
+		if t.Status != debridTypes.TorrentStatusDownloading && t.Seeders == 0 && t.Progress == 0 {
+			return true
+		}
+		// NZB entries stuck in error state with no progress
+		if t.State == storage.EntryStateError && t.Progress == 0 {
+			return true
+		}
+		return false
 	}, nil)
 }
 

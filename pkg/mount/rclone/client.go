@@ -250,8 +250,11 @@ func (m *Mount) forceUnmount() error {
 		{"fusermount3", "-uz", m.MountPath},
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	for _, method := range methods {
-		if err := m.tryUnmountCommand(method...); err == nil {
+		if err := m.tryUnmountCommand(ctx, method...); err == nil {
 			m.logger.Info().
 				Strs("command", method).
 				Msg("Successfully unmounted using system command")
@@ -263,11 +266,11 @@ func (m *Mount) forceUnmount() error {
 }
 
 // tryUnmountCommand tries to run an unmount command
-func (m *Mount) tryUnmountCommand(args ...string) error {
+func (m *Mount) tryUnmountCommand(ctx context.Context, args ...string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("no command provided")
 	}
 
-	cmd := exec.Command(args[0], args[1:]...)
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	return cmd.Run()
 }

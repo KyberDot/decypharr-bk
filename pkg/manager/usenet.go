@@ -10,6 +10,7 @@ import (
 	"github.com/sirrobot01/decypharr/internal/config"
 	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/sirrobot01/decypharr/pkg/usenet"
 	"github.com/sirrobot01/decypharr/pkg/usenet/parser"
 )
 
@@ -133,7 +134,7 @@ func (m *Manager) HasUsenet() bool {
 }
 
 // UsenetStats returns usenet client statistics
-func (m *Manager) UsenetStats() map[string]interface{} {
+func (m *Manager) UsenetStats() *usenet.UsenetStats {
 	if m.usenet == nil {
 		return nil
 	}
@@ -224,6 +225,14 @@ func (m *Manager) syncNZBs(ctx context.Context) error {
 	}
 
 	for _, meta := range newNZBs {
+		// Skip if already in storage or queue to avoid overwriting in-progress entries
+		if _, err := m.GetEntry(meta.ID); err == nil {
+			continue
+		}
+		if _, err := m.queue.GetTorrent(meta.ID); err == nil {
+			continue
+		}
+
 		entry := &storage.Entry{
 			InfoHash:         meta.ID,
 			Name:             meta.Name,

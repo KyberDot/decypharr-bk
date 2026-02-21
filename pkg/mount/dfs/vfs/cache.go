@@ -29,7 +29,7 @@ const (
 	metaFlushInterval = 2 * time.Second
 
 	// How long to keep unused cache items around before removing(no delete on disk, just remove from map and close file. Cleanup loop will remove from disk eventually.
-	itemIdleTimeout = 15 * time.Minute
+	itemIdleTimeout = 1 * time.Minute
 
 	// cacheEvictThreshold is the percentage of max cache size at which eviction starts.
 	cacheEvictThreshold = 0.90
@@ -51,11 +51,15 @@ type Cache struct {
 
 	createGroup singleflight.Group
 	threshold   int64
+
+	// Stat counters (owned by VFS Manager, set after construction)
+	bytesReadCounter *atomic.Int64
+	errorsCounter    *atomic.Int64
 }
 
 type candidateEntry struct {
 	key        string
-	path       string // entry directory (for cleanup of empty dirs)
+	path       string // entry directory (for evict of empty dirs)
 	dataPath   string // path to data file
 	metaPath   string // path to metadata .json file
 	atime      time.Time
@@ -90,24 +94,25 @@ func NewCache(ctx context.Context, mgr *manager.Manager, config *config.FuseConf
 		cancel:    cancel,
 		threshold: threshold,
 	}
+	go c.evictLoop()
 	go c.cleanupLoop()
 	return c, nil
 }
 
-// GetItem returns or creates a cache item for the given file
+// GetItem returns or creates a cache item for the given file.
+// Note: ATime is NOT updated here — it's only updated on Open() to avoid
+// stat/getattr calls keeping items alive and defeating idle evict.
 func (c *Cache) GetItem(entryName, filename string, fileSize int64) (*CacheItem, error) {
 	key := buildCacheKey(entryName, filename)
 
 	// Fast path: already exists
 	if item, ok := c.items.Load(key); ok {
-		item.touch()
 		return item, nil
 	}
 
 	// Slow path: create with singleflight to avoid global lock
 	val, err, _ := c.createGroup.Do(key, func() (interface{}, error) {
 		if item, ok := c.items.Load(key); ok {
-			item.touch()
 			return item, nil
 		}
 		item, err := c.newItem(key, entryName, filename, fileSize)
@@ -121,9 +126,7 @@ func (c *Cache) GetItem(entryName, filename string, fileSize int64) (*CacheItem,
 	if err != nil {
 		return nil, err
 	}
-	item := val.(*CacheItem)
-	item.touch()
-	return item, nil
+	return val.(*CacheItem), nil
 }
 
 func (c *Cache) scanDiskCandidates() ([]candidateEntry, int64) {
@@ -348,40 +351,61 @@ func (c *Cache) newItem(key, entryName, filename string, fileSize int64) (*Cache
 		key:      key,
 		entry:    entry,
 		filename: filename,
-		file:     fd,
 		metaPath: metaPath,
 		info:     info,
 		logger:   log.Rate(buildCacheKey(entryName, filename)),
 	}
+	item.file.Store(fd)
+	item.atime.Store(info.ATime.UnixNano())
+
+	// Initialize copy-on-write ranges from loaded metadata
+	rs := make(ranges.Ranges, len(info.Rs))
+	copy(rs, info.Rs)
+	item.ranges.Store(&rs)
 
 	// Create downloaders coordinator
-	item.downloaders = NewDownloaders(c.ctx, c.manager, item, c.config)
+	item.downloaders = NewDownloaders(c.ctx, c.manager, item, c.config, c.bytesReadCounter, c.errorsCounter)
 	item.startMetaWriter()
 	item.markMetadataDirty()
 
 	return item, nil
 }
 
-// cleanupLoop runs periodic cleanup
-func (c *Cache) cleanupLoop() {
+// evictLoop runs periodic evict
+func (c *Cache) evictLoop() {
 	ticker := time.NewTicker(c.config.CacheCleanupInterval)
 	defer ticker.Stop()
 
-	// Run cleanup immediately on startup to remove stale items before they can be accessed
-	c.cleanup()
+	// Run evict immediately on startup to remove stale items before they can be accessed
+	c.evict()
 
 	for {
 		select {
 		case <-ticker.C:
-			c.cleanup()
+			c.evict()
 		case <-c.ctx.Done():
 			return
 		}
 	}
 }
 
-// cleanup removes old and excess cache items
-func (c *Cache) cleanup() {
+func (c *Cache) cleanupLoop() {
+	ticker := time.NewTicker(itemIdleTimeout / 2)
+	defer ticker.Stop()
+
+	c.cleanupItems(itemIdleTimeout)
+
+	for {
+		select {
+		case <-ticker.C:
+			c.cleanupItems(itemIdleTimeout)
+		case <-c.ctx.Done():
+			return
+		}
+	}
+}
+
+func (c *Cache) cleanupItems(idleThreshold time.Duration) {
 	now := utils.Now()
 
 	var evicted []string
@@ -389,12 +413,8 @@ func (c *Cache) cleanup() {
 		if item.opens.Load() > 0 {
 			return true // Still open, keep in map
 		}
-
-		item.metaMu.RLock()
-		lastAccess := item.info.ATime
-		item.metaMu.RUnlock()
-
-		if now.Sub(lastAccess) > itemIdleTimeout {
+		lastAccess := time.Unix(0, item.atime.Load())
+		if now.Sub(lastAccess) > idleThreshold {
 			evicted = append(evicted, key)
 		}
 		return true
@@ -403,10 +423,15 @@ func (c *Cache) cleanup() {
 	// Actually evict the items (outside the Range to avoid concurrent modification)
 	for _, key := range evicted {
 		if item, ok := c.items.LoadAndDelete(key); ok {
-			item.Close()
+			_ = item.Close()
 			c.itemCount.Add(-1)
 		}
 	}
+}
+
+// evict removes old and excess cache items
+func (c *Cache) evict() {
+	now := utils.Now()
 
 	oldSize := c.totalSize.Load()
 	candidates, totalSize := c.scanDiskCandidates()
@@ -419,7 +444,7 @@ func (c *Cache) cleanup() {
 	totalSize, removedCount := c.evictCandidates(now, candidates, totalSize, 0)
 
 	if removedCount > 0 && oldSize > totalSize {
-		c.logger.Trace().Msgf("cache cleanup removed %d entries, freed %s (total size: %s)", removedCount, utils.FormatSize(oldSize-totalSize), utils.FormatSize(totalSize))
+		c.logger.Trace().Msgf("cache evict removed %d entries, freed %s (total size: %s)", removedCount, utils.FormatSize(oldSize-totalSize), utils.FormatSize(totalSize))
 	}
 
 	c.totalSize.Store(totalSize)
@@ -439,20 +464,19 @@ func (c *Cache) Close() error {
 	return nil
 }
 
-// GetStats returns cache statistics
-func (c *Cache) GetStats() map[string]interface{} {
+// Stats returns cache statistics.
+func (c *Cache) Stats() manager.CacheDetail {
 	maxSize := c.config.CacheDiskSize
 	utilization := 0.0
 	if maxSize > 0 {
 		utilization = float64(c.totalSize.Load()) / float64(maxSize)
 	}
 
-	return map[string]interface{}{
-		"type":        "vfs",
-		"total_size":  c.totalSize.Load(),
-		"max_size":    c.config.CacheDiskSize,
-		"item_count":  c.itemCount.Load(),
-		"utilization": utilization,
+	return manager.CacheDetail{
+		TotalSize:   c.totalSize.Load(),
+		MaxSize:     c.config.CacheDiskSize,
+		ItemCount:   c.itemCount.Load(),
+		Utilization: utilization,
 	}
 }
 
@@ -463,18 +487,24 @@ type CacheItem struct {
 	entry    *storage.Entry
 	filename string
 
-	file     *os.File
+	file     atomic.Pointer[os.File] // Lock-free file access (pread/pwrite are thread-safe)
 	metaPath string
 
 	info ItemInfo
+
+	// Lock-free access time tracking — avoids metaMu + disk flush on every Open()
+	atime atomic.Int64 // Unix nano timestamp, synced to info.ATime on flush
+
+	// Copy-on-write ranges — reads are lock-free via atomic load
+	ranges atomic.Pointer[ranges.Ranges] // Current downloaded ranges
 
 	opens       atomic.Int32 // Number of open handles (prevents eviction)
 	logger      *logger.RateLimitedEvent
 	downloaders *Downloaders // Download coordinator
 
-	metaMu sync.RWMutex
-	fileMu sync.RWMutex
-	dlMu   sync.Mutex
+	metaMu   sync.RWMutex // Protects info (except ATime and Rs which use atomics)
+	rangesMu sync.Mutex   // Serializes range mutations (copy-on-write)
+	dlMu     sync.Mutex
 
 	metaDirty   atomic.Bool
 	metaFlushCh chan struct{}
@@ -535,25 +565,36 @@ func (item *CacheItem) flushMetadata(force bool) {
 	}
 	item.metaMu.RLock()
 	info := item.info
-	if len(info.Rs) > 0 {
-		rsCopy := make(ranges.Ranges, len(info.Rs))
-		copy(rsCopy, info.Rs)
+	item.metaMu.RUnlock()
+
+	// Sync atomic ATime and copy-on-write ranges into the snapshot
+	info.ATime = time.Unix(0, item.atime.Load())
+	if rs := item.ranges.Load(); rs != nil && len(*rs) > 0 {
+		rsCopy := make(ranges.Ranges, len(*rs))
+		copy(rsCopy, *rs)
 		info.Rs = rsCopy
 	}
-	item.metaMu.RUnlock()
 
 	data, err := json.Marshal(info)
 	if err != nil {
 		item.cache.logger.Warn().Err(err).Str("key", item.key).Msg("failed to marshal cache metadata")
 		return
 	}
-	// Confirm directory exists before writing metadata (in case it was deleted by cleanup)
+	// Confirm directory exists before writing metadata (in case it was deleted by evict)
 	if err := os.MkdirAll(filepath.Dir(item.metaPath), 0755); err != nil {
 		item.cache.logger.Warn().Err(err).Str("key", item.key).Msg("failed to create cache directory for metadata")
 		return
 	}
-	if err := os.WriteFile(item.metaPath, data, 0644); err != nil {
+	// Atomic write: write to temp file then rename to avoid corrupt reads
+	// from scanDiskCandidates racing with this write.
+	tmpPath := item.metaPath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
 		item.cache.logger.Warn().Err(err).Str("key", item.key).Msg("failed to write cache metadata")
+		return
+	}
+	if err := os.Rename(tmpPath, item.metaPath); err != nil {
+		item.cache.logger.Warn().Err(err).Str("key", item.key).Msg("failed to rename cache metadata")
+		_ = os.Remove(tmpPath)
 		return
 	}
 	item.metaDirty.Store(false)
@@ -567,12 +608,9 @@ type ItemInfo struct {
 	ATime   time.Time     `json:"atime"`
 }
 
-// touch updates access time
+// touch updates access time (lock-free, no disk flush)
 func (item *CacheItem) touch() {
-	item.metaMu.Lock()
-	item.info.ATime = utils.Now()
-	item.metaMu.Unlock()
-	item.markMetadataDirty()
+	item.atime.Store(utils.Now().UnixNano())
 }
 
 // Open increments the open count (prevents eviction)
@@ -627,15 +665,12 @@ func (item *CacheItem) ReadAt(p []byte, off int64) (int, error) {
 		return 0, fmt.Errorf("download failed: %w", err)
 	}
 
-	// Read from sparse file
-	item.fileMu.RLock()
-	if item.file == nil {
-		item.fileMu.RUnlock()
+	// Read from sparse file (lock-free — pread is thread-safe)
+	f := item.file.Load()
+	if f == nil {
 		return 0, errors.New("cache file closed")
 	}
-	f := item.file
 	n, err := f.ReadAt(p, off)
-	item.fileMu.RUnlock()
 	if n > 0 {
 		dropFileCache(f, off, int64(n))
 	}
@@ -648,54 +683,54 @@ func (item *CacheItem) WriteAtNoOverwrite(p []byte, off int64) (n, skipped int, 
 	n = len(p)
 	skipped = 0
 
-	// Find all present/absent regions
-	item.metaMu.RLock()
-	rsSnapshot := append(ranges.Ranges(nil), item.info.Rs...)
-	item.metaMu.RUnlock()
-	frs := rsSnapshot.FindAll(writeRange)
+	// Find all present/absent regions (lock-free read of copy-on-write ranges)
+	rs := item.ranges.Load()
+	if rs == nil {
+		return n, skipped, errors.New("cache closed")
+	}
+	frs := rs.FindAll(writeRange)
 
-	item.fileMu.Lock()
-	if item.file == nil {
-		item.fileMu.Unlock()
+	// Write to sparse file (lock-free — pwrite is thread-safe, downloaders own non-overlapping offsets)
+	f := item.file.Load()
+	if f == nil {
 		return n, skipped, errors.New("cache file closed")
 	}
-	f := item.file
 	for _, fr := range frs {
 		if fr.Present {
-			// Skip - already on disk
 			skipped += int(fr.R.Size)
 			continue
 		}
-		// Write missing part
 		localOff := fr.R.Pos - off
 		_, err = f.WriteAt(p[localOff:localOff+fr.R.Size], fr.R.Pos)
 		if err != nil {
-			item.fileMu.Unlock()
 			return n, skipped, err
 		}
 	}
-	item.fileMu.Unlock()
 
-	// Mark range as present
-	item.metaMu.Lock()
-	item.info.Rs.Insert(writeRange)
-	item.metaMu.Unlock()
+	// Copy-on-write range update: serialize mutations, publish atomically
+	item.rangesMu.Lock()
+	current := item.ranges.Load()
+	updated := make(ranges.Ranges, len(*current))
+	copy(updated, *current)
+	updated.Insert(writeRange)
+	item.ranges.Store(&updated)
+	item.rangesMu.Unlock()
+
 	item.markMetadataDirty()
 	return n, skipped, nil
 }
 
-// HasRange returns true if entire range is on disk
+// HasRange returns true if entire range is on disk (lock-free)
 func (item *CacheItem) HasRange(r ranges.Range) bool {
-	item.metaMu.RLock()
-	defer item.metaMu.RUnlock()
-	return item.info.Rs.Present(r)
+	rs := item.ranges.Load()
+	if rs == nil {
+		return false
+	}
+	return rs.Present(r)
 }
 
-// FindMissing returns portion of r not yet downloaded
+// FindMissing returns portion of r not yet downloaded (lock-free)
 func (item *CacheItem) FindMissing(r ranges.Range) ranges.Range {
-	item.metaMu.RLock()
-	defer item.metaMu.RUnlock()
-
 	// Clip to file size
 	if r.End() > item.info.Size {
 		r.Size = item.info.Size - r.Pos
@@ -703,7 +738,11 @@ func (item *CacheItem) FindMissing(r ranges.Range) ranges.Range {
 	if r.Size <= 0 {
 		return ranges.Range{}
 	}
-	return item.info.Rs.FindMissing(r)
+	rs := item.ranges.Load()
+	if rs == nil {
+		return r
+	}
+	return rs.FindMissing(r)
 }
 
 // Close closes the cache item and saves metadata
@@ -724,14 +763,12 @@ func (item *CacheItem) Close() error {
 		item.stopMetaWriter()
 		item.flushMetadata(true)
 
-		item.fileMu.Lock()
-		if item.file != nil {
-			if err := item.file.Close(); err != nil && item.closeErr == nil {
+		// Atomically swap file to nil, then close the old fd
+		if f := item.file.Swap(nil); f != nil {
+			if err := f.Close(); err != nil && item.closeErr == nil {
 				item.closeErr = err
 			}
-			item.file = nil
 		}
-		item.fileMu.Unlock()
 	})
 	return item.closeErr
 }

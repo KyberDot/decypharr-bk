@@ -38,6 +38,7 @@ var _ = (fs.NodeLookuper)((*Dir)(nil))
 var _ = (fs.NodeReaddirer)((*Dir)(nil))
 var _ = (fs.NodeGetattrer)((*Dir)(nil))
 var _ = (fs.NodeUnlinker)((*Dir)(nil))
+var _ = (fs.NodeRmdirer)((*Dir)(nil))
 
 // NewDir creates a new directory
 func NewDir(vfsManager *vfs.Manager, manager *manager.Manager, name string, level DirLevel, modTime uint64, config *config.FuseConfig, logger zerolog.Logger) *Dir {
@@ -253,8 +254,8 @@ func (d *Dir) Unlink(ctx context.Context, name string) syscall.Errno {
 	return 0
 }
 
-// RmDir removes a directory from this directory
-func (d *Dir) RmDir(ctx context.Context, name string) syscall.Errno {
+// Rmdir removes a directory from this directory
+func (d *Dir) Rmdir(ctx context.Context, name string) syscall.Errno {
 	if d.level != LevelTorrent {
 		return syscall.EPERM
 	}

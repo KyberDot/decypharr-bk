@@ -296,7 +296,7 @@
             const mountContent = document.getElementById('mount-content');
             const rcloneLogsBtn = document.getElementById('rclone-logs-btn');
 
-            // Determine mount type (rclone, dfs, or external)
+            // Determine mount type
             let type = 'None';
 
             if (mountData && mountData.type === "rclone" && mountData.enabled) {
@@ -320,7 +320,7 @@
                 return;
             }
 
-            // For DFS mount
+            // For DFS mount — stats are in mount.dfs
             if (type === 'DFS') {
                 updateDFSStats(mountData, mountStatus, mountContent);
                 return;
@@ -337,11 +337,14 @@
             mountStatus.textContent = 'Active';
             mountStatus.className = 'badge badge-success';
 
-            updateRcloneStats(mountData.detail || {}, mountContent);
+            // rclone stats are in mount.rclone, external in mount.external
+            const rcloneData = mountData.rclone || mountData.external || {};
+            updateRcloneStats(rcloneData, mountContent);
         }
 
         function updateDFSStats(data, statusEl, contentEl) {
-            if (!data.ready) {
+            const dfs = data.dfs;
+            if (!data.ready || !dfs) {
                 statusEl.textContent = 'Not Ready';
                 statusEl.className = 'badge badge-warning';
                 contentEl.innerHTML = '<p class="text-base-content/70">DFS filesystem is not ready.</p>';
@@ -351,15 +354,15 @@
             statusEl.textContent = 'Active';
             statusEl.className = 'badge badge-success';
 
-            const detail = data.detail || {};
-            const activeFiles = detail.active_files || 0;
-            const totalFiles = detail.total_files || 0;
-            const cacheItems = detail.cache_item_count || 0;
-            const cacheTotalSize = detail.cache_total_size || 0;
-            const cacheMaxSize = detail.cache_max_size || 0;
-            const cacheType = (detail.cache_type || 'vfs').toUpperCase();
-            const cacheUtilizationValue = detail.cache_utilization != null
-                ? detail.cache_utilization
+            const vfsStats = dfs.vfs || {};
+            const cache = vfsStats.cache || {};
+            const activeFiles = vfsStats.active_files || 0;
+            const totalFiles = vfsStats.total_files || 0;
+            const cacheItems = cache.item_count || 0;
+            const cacheTotalSize = cache.total_size || 0;
+            const cacheMaxSize = cache.max_size || 0;
+            const cacheUtilizationValue = cache.utilization != null
+                ? cache.utilization
                 : (cacheMaxSize > 0 ? cacheTotalSize / cacheMaxSize : 0);
             const cacheUtilizationPercent = (cacheUtilizationValue * 100).toFixed(1);
             const cacheUsageNumber = Number(cacheUtilizationPercent);
@@ -377,12 +380,29 @@
                     <div class="stat">
                         <div class="stat-title">Cache Items</div>
                         <div class="stat-value text-secondary">${formatNumber(cacheItems)}</div>
-                        <div class="stat-desc">${cacheType} cache</div>
+                        <div class="stat-desc">VFS cache</div>
                     </div>
                     <div class="stat">
                         <div class="stat-title">Cache Utilization</div>
                         <div class="stat-value ${cacheUsageTextClass}">${cacheUtilizationPercent}%</div>
                         <div class="stat-desc">${window.decypharrUtils.formatBytes(cacheTotalSize)} / ${window.decypharrUtils.formatBytes(cacheMaxSize)}</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-title">Backend</div>
+                        <div class="stat-value text-info text-lg">${(dfs.backend || 'unknown').toUpperCase()}</div>
+                        <div class="stat-desc">${dfs.mount_path || '-'}</div>
+                    </div>
+                </div>
+                <div class="grid grid-cols-2 gap-3 mt-4">
+                    <div class="stat bg-base-200 rounded-lg p-3">
+                        <div class="stat-title text-xs">Total Downloaded</div>
+                        <div class="stat-value text-sm">${window.decypharrUtils.formatBytes(vfsStats.total_bytes_read || 0)}</div>
+                        <div class="stat-desc">Since service start</div>
+                    </div>
+                    <div class="stat bg-base-200 rounded-lg p-3">
+                        <div class="stat-title text-xs">Download Errors</div>
+                        <div class="stat-value text-sm ${(vfsStats.total_errors || 0) > 0 ? 'text-error' : 'text-success'}">${formatNumber(vfsStats.total_errors || 0)}</div>
+                        <div class="stat-desc">Since service start</div>
                     </div>
                 </div>
             `;

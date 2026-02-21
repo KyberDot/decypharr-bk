@@ -23,22 +23,6 @@ type Mount struct {
 	client    *rclone.Client
 }
 
-func (m *Mount) Stats() map[string]interface{} {
-	info := m.getMountInfo()
-	mounted := false
-	if info != nil {
-		mounted = info.Mounted
-	}
-	return map[string]interface{}{
-		"enabled":   true,
-		"ready":     mounted,
-		"type":      m.Type(),
-		"mountPath": m.MountPath,
-		"webdavURL": m.WebDAVURL,
-		"mounted":   mounted,
-	}
-}
-
 // NewMount creates a new RC-based mount
 func NewMount(mgr *manager.Manager, rcClient *rclone.Client) (*Mount, error) {
 	cfg := config.Get()

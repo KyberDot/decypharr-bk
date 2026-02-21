@@ -66,6 +66,10 @@ type Downloaders struct {
 	// Circuit breaker - blocks all requests when max errors reached
 	circuitOpen   atomic.Bool  // True when circuit is "open" (blocking all requests)
 	circuitOpenAt atomic.Int64 // Unix nano timestamp when circuit opened
+
+	// Stat counters (point to VFS Manager's atomics)
+	bytesReadCounter *atomic.Int64
+	errorsCounter    *atomic.Int64
 }
 
 // ensureStreamTracked makes sure the active stream is registered when reads begin.
@@ -118,7 +122,7 @@ type downloader struct {
 }
 
 // NewDownloaders creates a new download coordinator
-func NewDownloaders(ctx context.Context, mgr *manager.Manager, item *CacheItem, cfg *fuseconfig.FuseConfig) *Downloaders {
+func NewDownloaders(ctx context.Context, mgr *manager.Manager, item *CacheItem, cfg *fuseconfig.FuseConfig, bytesRead, errors *atomic.Int64) *Downloaders {
 	parentCtx := ctx
 	ctx, cancel := context.WithCancel(parentCtx)
 	chunkSize := cfg.ChunkSize
@@ -135,16 +139,17 @@ func NewDownloaders(ctx context.Context, mgr *manager.Manager, item *CacheItem, 
 	}
 
 	dls := &Downloaders{
-		parentCtx:     parentCtx,
-		ctx:           ctx,
-		cancel:        cancel,
-		item:          item,
-		manager:       mgr,
-		chunkSize:     chunkSize,
-		readAheadSize: readAheadSize,
-		retries:       retries,
-		// streamID is populated lazily when the first read occurs.
-		streamID: "",
+		parentCtx:        parentCtx,
+		ctx:              ctx,
+		cancel:           cancel,
+		item:             item,
+		manager:          mgr,
+		chunkSize:        chunkSize,
+		readAheadSize:    readAheadSize,
+		retries:          retries,
+		streamID:         "",
+		bytesReadCounter: bytesRead,
+		errorsCounter:    errors,
 	}
 	dls.touchActivity() // Initialize activity timestamp
 
@@ -358,6 +363,11 @@ func (dls *Downloaders) removeClosed() {
 
 // countErrors tracks errors and resets on success
 func (dls *Downloaders) countErrors(n int64, err error) {
+	// Update stats counters
+	if n > 0 && dls.bytesReadCounter != nil {
+		dls.bytesReadCounter.Add(n)
+	}
+
 	dls.mu.Lock()
 	defer dls.mu.Unlock()
 
@@ -369,6 +379,9 @@ func (dls *Downloaders) countErrors(n int64, err error) {
 		return
 	}
 	if err != nil {
+		if dls.errorsCounter != nil {
+			dls.errorsCounter.Add(1)
+		}
 		dls.errorCount++
 		dls.lastErr = err
 		if !customerror.IsSilentError(err) {
@@ -570,7 +583,7 @@ func (dls *Downloaders) checkIdleTimeout() bool {
 	oldCancel()
 
 	// Wait for downloader goroutines to actually exit so no zombie
-	// connections or goroutines linger after idle cleanup.
+	// connections or goroutines linger after idle evict.
 	for _, dl := range dlsCopy {
 		dl.wg.Wait()
 	}

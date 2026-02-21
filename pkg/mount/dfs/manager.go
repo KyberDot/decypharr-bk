@@ -78,18 +78,17 @@ func (m *Manager) Refresh(dirs []string) error {
 	return nil
 }
 
-// Stats returns unified statistics across all DFS mounts
-func (m *Manager) Stats() map[string]interface{} {
-	// Aggregate stats from all mounts
-	stats := map[string]interface{}{
-		"enabled": true,
-		"ready":   m.ready.Load(),
-		"type":    m.Type(),
+// Stats returns unified mount statistics
+func (m *Manager) Stats() *manager.MountStats {
+	ms := &manager.MountStats{
+		Enabled: true,
+		Ready:   m.ready.Load(),
+		Type:    m.Type(),
 	}
-	for key, stat := range m.mount.Stats() {
-		stats[key] = stat
+	if m.mount != nil {
+		ms.DFS = m.mount.dfsDetail()
 	}
-	return stats
+	return ms
 }
 
 func (m *Manager) Type() string {

@@ -21,6 +21,15 @@ func (s *Storage) UpdateEntryItem(entry *Entry) error {
 	return nil
 }
 
+func (s *Storage) UpdateItem(item *EntryItem) error {
+	pb := EntryItemToProto(item)
+	data, err := proto.Marshal(pb)
+	if err != nil {
+		return err
+	}
+	return s.entryItems.Put(item.Name, data, nil)
+}
+
 // GetEntryItem retrieves an entry item by name
 func (s *Storage) GetEntryItem(name string) (*EntryItem, error) {
 	data, err := s.entryItems.Get(name)

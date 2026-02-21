@@ -3,20 +3,21 @@ package stats
 import (
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"github.com/sirrobot01/decypharr/pkg/manager"
+	"github.com/sirrobot01/decypharr/pkg/usenet"
 )
 
 // Snapshot holds a point-in-time stats snapshot.
 // Using typed structs avoids map[string]any allocations on every JSON encode.
 type Snapshot struct {
-	System        SystemStats             `json:"system"`
-	Debrids       []types.Stats           `json:"debrids"`
-	Mount         MountStats              `json:"mount"`
-	Usenet        map[string]any          `json:"usenet,omitempty"`
+	System       SystemStats             `json:"system"`
+	Debrids      []types.Stats           `json:"debrids"`
+	Mount        *manager.MountStats     `json:"mount"`
+	Usenet       *usenet.UsenetStats     `json:"usenet,omitempty"`
 	ActiveStreams ActiveStreamStats       `json:"active_streams"`
-	Storage       StorageStats            `json:"storage"`
-	Queue         QueueStats              `json:"queue"`
-	Arrs          ArrStats                `json:"arrs"`
-	Repair        manager.RepairJobCounts `json:"repair"`
+	Storage      StorageStats            `json:"storage"`
+	Queue        QueueStats              `json:"queue"`
+	Arrs         ArrStats                `json:"arrs"`
+	Repair       manager.RepairJobCounts `json:"repair"`
 }
 
 type SystemStats struct {
@@ -33,19 +34,9 @@ type SystemStats struct {
 	StartTime     string `json:"start_time"`
 }
 
-type MountStats struct {
-	Ready   bool   `json:"ready"`
-	Enabled bool   `json:"enabled"`
-	Type    string `json:"type,omitempty"`
-	Error   string `json:"error,omitempty"`
-	// Detail holds the subsystem-specific stats (e.g. VFS counters).
-	// nil when mount is not ready.
-	Detail map[string]any `json:"detail,omitempty"`
-}
-
 type ActiveStreamStats struct {
-	Count   int                      `json:"count"`
-	Streams []*manager.ActiveStream  `json:"streams"`
+	Count   int                     `json:"count"`
+	Streams []*manager.ActiveStream `json:"streams"`
 }
 
 type StorageStats struct {
@@ -61,4 +52,3 @@ type ArrStats struct {
 	Count int      `json:"count"`
 	Names []string `json:"names"`
 }
-

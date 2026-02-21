@@ -326,19 +326,23 @@ func (m *Manager) RemoveEntry(entry *FileInfo) error {
 	if entry.isDir {
 		// This is a torrent folder
 		m.logger.Debug().Str("entry", entry.name).Msg("Removing entry folder")
-		et, err := m.storage.GetEntryItem(entry.name)
-		if err != nil {
-			return fmt.Errorf("torrent %s not found", entry.name)
+		infohash := entry.infohash
+		if infohash == "" {
+			// Fallback: look up from storage
+			et, err := m.storage.GetEntryItem(entry.name)
+			if err != nil {
+				return fmt.Errorf("torrent %s not found", entry.name)
+			}
+			if len(et.Files) == 0 {
+				return fmt.Errorf("torrent %s has no files", entry.name)
+			}
+			firstFile, err := et.GetFirstFile()
+			if err != nil {
+				return fmt.Errorf("failed to get first file of torrent %s: %w", entry.name, err)
+			}
+			infohash = firstFile.InfoHash
 		}
-		if len(et.Files) == 0 {
-			return fmt.Errorf("torrent %s has no files", entry.name)
-		}
-		// GetReader InfoHash from one of the files
-		firstFile, err := et.GetFirstFile()
-		if err != nil {
-			return fmt.Errorf("failed to get first file of torrent %s: %w", entry.name, err)
-		}
-		return m.DeleteEntry(firstFile.InfoHash, true)
+		return m.DeleteEntry(infohash, true)
 	}
 	// This is a file within a torrent
 	return m.RemoveTorrentFile(entry.Parent(), entry.Name())
@@ -399,34 +403,35 @@ func (m *Manager) CopyEntry(entry *FileInfo, destPath string, delete bool) error
 }
 
 func (m *Manager) RemoveTorrentFile(torrentName, filename string) error {
-	entry, err := m.storage.GetEntryItem(torrentName)
+	item, err := m.storage.GetEntryItem(torrentName)
 	if err != nil {
-		return fmt.Errorf("torrent %s not found", torrentName)
+		return fmt.Errorf("entry %s not found", torrentName)
 	}
-	file, err := entry.GetFile(filename)
+	file, err := item.GetFile(filename)
 	if err != nil {
-		return fmt.Errorf("file %s not found in torrent %s", filename, torrentName)
+		return fmt.Errorf("file %s not found in entry %s", filename, torrentName)
 	}
 	file.Deleted = true
-	entry.Files[filename] = file
+	item.Files[filename] = file
 
-	// GetReader torrent here
-	torrent, err := m.GetEntry(file.InfoHash)
-	if err != nil {
-		return fmt.Errorf("failed to get torrent %s: %w", torrentName, err)
+	// Update item in storage
+	if err := m.storage.UpdateItem(item); err != nil {
+		return fmt.Errorf("failed to update entry %s: %w", torrentName, err)
 	}
 
-	// If the torrent has no files left, delete it
-	if len(torrent.GetActiveFiles()) == 0 {
-		m.logger.Debug().Msgf("Entry %s has no files left, deleting it", torrent.InfoHash)
-		if err := m.DeleteEntry(torrent.InfoHash, true); err != nil {
-			return fmt.Errorf("failed to delete torrent %s: %w", torrent.InfoHash, err)
+	// If the torrent has no more files, delete the entire entry
+	hasFiles := false
+	for _, f := range item.Files {
+		if !f.Deleted {
+			hasFiles = true
+			break
 		}
-		return nil
 	}
-	return m.AddOrUpdate(torrent, func(t *storage.Entry) {
-		m.RefreshEntries(true)
-	})
+	if !hasFiles {
+		m.logger.Debug().Str("entry", torrentName).Msg("Removing entry folder as it has no more files")
+		return m.DeleteEntry(file.InfoHash, true)
+	}
+	return nil
 }
 
 func (m *Manager) getCustomFolderChildren(folder string) []FileInfo {

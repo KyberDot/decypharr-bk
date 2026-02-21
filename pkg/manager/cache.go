@@ -81,4 +81,11 @@ func (e *EntryCache) Refresh() {
 	for k := range e.manager.config.CustomFolders {
 		e.entries.Delete(k)
 	}
+	// Also clear torrent-level cache entries to prevent stale file listings
+	e.entries.Range(func(key string, _ EntryCacheItem) bool {
+		if strings.HasPrefix(key, torrentEntryCachePrefix) {
+			e.entries.Delete(key)
+		}
+		return true
+	})
 }

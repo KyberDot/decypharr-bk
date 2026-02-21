@@ -259,31 +259,12 @@ func (c *Collector) getProfiles() map[string]*debridTypes.Profile {
 }
 
 // collectMount gathers mount stats.
-func (c *Collector) collectMount(cfg *config.Config) MountStats {
+func (c *Collector) collectMount(cfg *config.Config) *manager.MountStats {
 	mountMgr := c.mgr.MountManager()
-	enabled := cfg.Mount.Type != config.MountTypeNone
-
-	if mountMgr == nil || !mountMgr.IsReady() {
-		return MountStats{
-			Ready:   false,
-			Enabled: enabled,
+	if mountMgr == nil {
+		return &manager.MountStats{
+			Enabled: cfg.Mount.Type != config.MountTypeNone,
 		}
 	}
-
-	mountStats := mountMgr.Stats()
-	if mountStats == nil {
-		return MountStats{
-			Ready:   true,
-			Enabled: enabled,
-			Type:    mountMgr.Type(),
-			Error:   "failed to get mount stats",
-		}
-	}
-
-	return MountStats{
-		Ready:   true,
-		Enabled: enabled,
-		Type:    mountMgr.Type(),
-		Detail:  mountStats,
-	}
+	return mountMgr.Stats()
 }

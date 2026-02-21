@@ -104,15 +104,19 @@ func (m *Mount) Stop() error {
 	return nil
 }
 
-// Stats returns structured statistics for this mount
-func (m *Mount) Stats() map[string]interface{} {
-	stats := make(map[string]interface{})
-	if m.vfs != nil {
-		stats = m.vfs.GetStats()
+// dfsDetail returns DFS-specific statistics for the unified MountStats.
+func (m *Mount) dfsDetail() *manager.DFSDetail {
+	d := &manager.DFSDetail{
+		Backend: string(m.backendType),
+		Ready:   m.ready.Load(),
 	}
-	stats["backend"] = string(m.backendType)
-	stats["ready"] = m.ready.Load()
-	return stats
+	if m.config != nil {
+		d.MountPath = m.config.MountPath
+	}
+	if m.vfs != nil {
+		d.VFS = m.vfs.Stats()
+	}
+	return d
 }
 
 // Type returns the mount type

@@ -351,6 +351,54 @@ func (f *FS) Fsync(path string, datasync bool, fh uint64) int {
 	return 0
 }
 
+// Unlink removes a file
+func (f *FS) Unlink(path string) int {
+	parts := splitPath(path)
+	if len(parts) < 2 {
+		return -fuse.EPERM
+	}
+
+	info, err := f.getFileInfo(path)
+	if err != nil {
+		return -fuse.ENOENT
+	}
+
+	if info.IsDir() {
+		return -fuse.EISDIR
+	}
+
+	if err := f.manager.RemoveEntry(info); err != nil {
+		f.logger.Error().Err(err).Str("file", info.Name()).Msg("Failed to remove file")
+		return -fuse.EIO
+	}
+
+	return 0
+}
+
+// Rmdir removes a directory
+func (f *FS) Rmdir(path string) int {
+	parts := splitPath(path)
+	if len(parts) < 1 {
+		return -fuse.EPERM
+	}
+
+	info, err := f.getFileInfo(path)
+	if err != nil {
+		return -fuse.ENOENT
+	}
+
+	if !info.IsDir() {
+		return -fuse.ENOTDIR
+	}
+
+	if err := f.manager.RemoveEntry(info); err != nil {
+		f.logger.Error().Err(err).Str("dir", info.Name()).Msg("Failed to remove directory")
+		return -fuse.EIO
+	}
+
+	return 0
+}
+
 // Access checks file access permissions
 // This is a no-op - returning EACCES for write checks causes Windows media
 // players to refuse to open files even for reading

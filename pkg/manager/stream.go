@@ -144,6 +144,10 @@ func (m *Manager) Stream(ctx context.Context, entry *storage.Entry, filename str
 		return retry.Unrecoverable(fmt.Errorf("file %s not found", filename))
 	}
 	start, end, err := normalizeStreamRange(file.Size, start, end)
+
+	sizeMb := float64(end-start+1) / (1024 * 1024)
+	fmt.Println("Streaming file:", filename, "Size (MB):", fmt.Sprintf("%.2f", sizeMb), "Range:", fmt.Sprintf("%d-%d", start, end), "Client:", client)
+
 	if err != nil {
 		return retry.Unrecoverable(fmt.Errorf("invalid stream range for file %s: %w", filename, err))
 	}
