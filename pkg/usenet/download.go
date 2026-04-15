@@ -110,7 +110,7 @@ func (u *Usenet) Download(ctx context.Context, nzoID, filename string, writer io
 	}()
 
 	// Fetch segments in parallel
-	p := pool.New().WithContext(ctx).WithMaxGoroutines(u.maxConnections)
+	p := pool.New().WithContext(ctx).WithMaxGoroutines(max(u.maxConnections, 1))
 
 	for idx, segment := range file.Segments {
 		segIdx := idx
