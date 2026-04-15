@@ -411,79 +411,24 @@ func decodeUnicode(asciiStr string, unicodeData []byte) string {
 
 // readFiles reads all file entries in the archive
 func (r *Reader) readFiles() error {
-	pos := r.Marker
-	pos += int64(len(Rar3Marker)) // Skip marker block
+	// NewReader already validated the archive header and stored where it ends.
+	pos := r.HeaderEndPos
 
-	// Read archive header
-	headerData, err := r.readBytes(pos, 7)
-	if err != nil {
-		return err
-	}
-
-	if len(headerData) < 7 {
-		return ErrInvalidFormat
-	}
-
-	headType := headerData[2]
-	headSize := int(binary.LittleEndian.Uint16(headerData[5:7]))
-
-	if headType != BlockHeader {
-		return ErrInvalidFormat
-	}
-
-	pos += int64(headSize) // Skip archive header
-
-	// Parse file entries with retry
-	err = retry.Do(
-		func() error {
-			var readErr error
-			headerData, readErr = r.readBytes(pos, 7)
-			if readErr != nil {
-				if !errors.Is(readErr, io.EOF) && !errors.Is(readErr, ErrNetworkError) {
-					return retry.Unrecoverable(fmt.Errorf("error reading block header: %w", readErr))
-				}
-				return readErr
-			}
-			if len(headerData) < 7 {
-				return fmt.Errorf("incomplete block header")
-			}
-			return nil
-		},
-		retry.Attempts(4),
-		retry.Delay(config.DefaultRetryDelay),
-		retry.MaxDelay(config.DefaultRetryDelayMax),
-		retry.DelayType(retry.BackOffDelay),
-		retry.LastErrorOnly(true),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to read block header after retries: %w", err)
-	}
-
-	if len(headerData) < 7 {
-		return fmt.Errorf("incomplete block header at position %d", pos)
-	}
-
-	headType = headerData[2]
-	headFlags := int(binary.LittleEndian.Uint16(headerData[3:5]))
-	headSize = int(binary.LittleEndian.Uint16(headerData[5:7]))
-
-	if headType == BlockEnd {
-		// End of archive
-		return nil
-	}
-
-	if headType == BlockFile {
-		// GetReader complete header data with retry
-		var completeHeader []byte
-		err = retry.Do(
+	// Process all blocks until BlockEnd or EOF.
+	for {
+		var headerData []byte
+		err := retry.Do(
 			func() error {
 				var readErr error
-				completeHeader, readErr = r.readBytes(pos, headSize)
+				headerData, readErr = r.readBytes(pos, 7)
 				if readErr != nil {
+					if !errors.Is(readErr, io.EOF) && !errors.Is(readErr, ErrNetworkError) {
+						return retry.Unrecoverable(fmt.Errorf("error reading block header: %w", readErr))
+					}
 					return readErr
 				}
-				if len(completeHeader) < headSize {
-					return fmt.Errorf("incomplete header data")
+				if len(headerData) < 7 {
+					return fmt.Errorf("incomplete block header")
 				}
 				return nil
 			},
@@ -493,31 +438,30 @@ func (r *Reader) readFiles() error {
 			retry.DelayType(retry.BackOffDelay),
 			retry.LastErrorOnly(true),
 		)
-		if err != nil {
-			return fmt.Errorf("failed to read complete file header after retries: %w", err)
+		if err != nil || len(headerData) < 7 {
+			// EOF or unrecoverable read error — stop iteration.
+			break
 		}
 
-		fileInfo, err := r.parseFileHeader(completeHeader, pos)
-		if err == nil && fileInfo != nil {
-			r.Files = append(r.Files, fileInfo)
-		}
-	} else {
-		// Skip non-file block
-		pos += int64(headSize)
+		headType := headerData[2]
+		headFlags := int(binary.LittleEndian.Uint16(headerData[3:5]))
+		headSize := int(binary.LittleEndian.Uint16(headerData[5:7]))
 
-		// Skip data if present
-		if headFlags&FlagHasData != 0 {
-			// Read data size with retry
-			var sizeData []byte
+		if headType == BlockEnd {
+			break
+		}
+
+		if headType == BlockFile {
+			var completeHeader []byte
 			err = retry.Do(
 				func() error {
 					var readErr error
-					sizeData, readErr = r.readBytes(pos-4, 4)
+					completeHeader, readErr = r.readBytes(pos, headSize)
 					if readErr != nil {
 						return readErr
 					}
-					if len(sizeData) < 4 {
-						return fmt.Errorf("incomplete size data")
+					if len(completeHeader) < headSize {
+						return fmt.Errorf("incomplete header data")
 					}
 					return nil
 				},
@@ -528,7 +472,46 @@ func (r *Reader) readFiles() error {
 				retry.LastErrorOnly(true),
 			)
 			if err != nil {
-				return fmt.Errorf("failed to read data size after retries: %w", err)
+				return fmt.Errorf("failed to read complete file header after retries: %w", err)
+			}
+
+			fileInfo, err := r.parseFileHeader(completeHeader, pos)
+			if err == nil && fileInfo != nil {
+				r.Files = append(r.Files, fileInfo)
+				pos = fileInfo.NextOffset
+			} else {
+				pos += int64(headSize)
+			}
+		} else {
+			// Skip non-file block
+			pos += int64(headSize)
+
+			// Skip data if present
+			if headFlags&FlagHasData != 0 {
+				var sizeData []byte
+				err = retry.Do(
+					func() error {
+						var readErr error
+						sizeData, readErr = r.readBytes(pos-4, 4)
+						if readErr != nil {
+							return readErr
+						}
+						if len(sizeData) < 4 {
+							return fmt.Errorf("incomplete size data")
+						}
+						return nil
+					},
+					retry.Attempts(4),
+					retry.Delay(config.DefaultRetryDelay),
+					retry.MaxDelay(config.DefaultRetryDelayMax),
+					retry.DelayType(retry.BackOffDelay),
+					retry.LastErrorOnly(true),
+				)
+				if err != nil {
+					return fmt.Errorf("failed to read data size after retries: %w", err)
+				}
+				dataSize := int64(binary.LittleEndian.Uint32(sizeData))
+				pos += dataSize
 			}
 		}
 	}

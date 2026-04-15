@@ -30,6 +30,25 @@ const shouldRenderSearch =
 	</div>
 </div>
 
+<script is:inline>
+	function injectSponsorLink() {
+		if (document.querySelector('[data-sponsor]')) return;
+		var socialIcons = document.querySelector('.social-icons');
+		if (!socialIcons) return;
+		var a = document.createElement('a');
+		a.href = 'https://sponsor.decypharr.com';
+		a.target = '_blank';
+		a.rel = 'noopener noreferrer';
+		a.setAttribute('data-sponsor', '');
+		a.setAttribute('aria-label', 'Sponsor Decypharr');
+		a.style.cssText = 'display:inline-flex;align-items:center;gap:0.35rem;color:#e05d5d;text-decoration:none;font-size:0.875rem;font-weight:600;white-space:nowrap;';
+		a.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" viewBox="0 0 16 16" aria-hidden="true"><path fill-rule="evenodd" d="M8 1.314C12.438-3.248 23.534 4.735 8 15-7.534 4.736 3.562-3.248 8 1.314"/></svg><span>Sponsor</span>';
+		socialIcons.appendChild(a);
+	}
+	document.addEventListener('DOMContentLoaded', injectSponsorLink);
+	document.addEventListener('astro:page-load', injectSponsorLink);
+</script>
+
 <style>
 	@layer starlight.core {
 		.header {
@@ -78,7 +97,7 @@ const shouldRenderSearch =
 				);
 				display: grid;
 				grid-template-columns:
-        /* 1 (site title): runs up until the main content column’s left edge or the width of the title, whichever is the largest  */
+      /* 1 (site title): runs up until the main content column's left edge or the width of the title, whichever is the largest  */
 					minmax(
 						calc(var(--__sidebar-width) + max(0rem, var(--__main-column-fr) - var(--sl-nav-gap))),
 						auto

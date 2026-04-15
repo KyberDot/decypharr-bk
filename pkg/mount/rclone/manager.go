@@ -272,8 +272,8 @@ func (m *Manager) startMount(ctx context.Context) error {
 	}
 
 	if err := m.mountWithRetry(ctx, 3); err != nil {
-		m.logger.Error().Msg("Mount operation failed")
-		return fmt.Errorf("mount failed for")
+		m.logger.Error().Err(err).Msg("Mount operation failed")
+		return err
 	}
 	go m.MonitorMounts(ctx)
 	return nil

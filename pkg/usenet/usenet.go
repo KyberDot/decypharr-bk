@@ -423,9 +423,12 @@ func (u *Usenet) checkFileAvailability(ctx context.Context, file *storage.NZBFil
 		Int("sample_percent", samplePercent).
 		Msg("Checking NZB File availability")
 
-	// Use pipelined batch STAT - much more efficient than individual calls
-	// BatchStat handles connection pooling, pipelining, and returns per-segment results
-	result, err := u.nntp.BatchStat(ctx, u.maxConnections, messageIDs)
+	// Use pipelined batch STAT - much more efficient than individual calls.
+	// Cap connections to 2: STAT commands are fast and pipelined (50/batch),
+	// so 1-2 connections is sufficient. Using maxConnections here starves the
+	// download pool when multiple files are probed concurrently.
+	availCheckConns := min(u.maxConnections, 2)
+	result, err := u.nntp.BatchStat(ctx, availCheckConns, messageIDs)
 	if err != nil {
 		// Connection/system error - log and continue (don't fail availability check)
 		u.logger.Warn().
@@ -435,14 +438,30 @@ func (u *Usenet) checkFileAvailability(ctx context.Context, file *storage.NZBFil
 		return nil
 	}
 
-	// Check if all sampled segments are available
+	// Check if all sampled segments are available.
+	// Distinguish genuine article-not-found from connection errors:
+	//   TotalCount = FoundCount + notFoundCount + ErrorCount
+	// Only treat a file as unavailable when segments are definitively missing
+	// (notFoundCount > 0). Connection errors mean we couldn't check — treat
+	// those the same as the top-level error path above (non-fatal, skip check).
 	if !result.AllAvailable() {
-		// if even one segment is missing, mark file as unavailable
+		notFoundCount := result.TotalCount - result.FoundCount - result.ErrorCount
+		if result.ErrorCount > 0 && notFoundCount == 0 {
+			// All failures were connection errors, not missing articles.
+			u.logger.Warn().
+				Str("file", file.Name).
+				Int("total_segments", len(file.Segments)).
+				Int("error_count", result.ErrorCount).
+				Msg("Could not verify all segments due to connection errors, skipping availability check")
+			return nil
+		}
+		// At least some segments are definitively missing.
 		u.logger.Warn().
 			Str("file", file.Name).
 			Int("total_segments", len(file.Segments)).
 			Int("available_segments", result.FoundCount).
-			Int("missing_segments", result.TotalCount-result.FoundCount).
+			Int("missing_segments", notFoundCount).
+			Int("error_count", result.ErrorCount).
 			Msg("File is unavailable - one or more segments are missing")
 		return customerror.UsenetSegmentMissingError
 	}

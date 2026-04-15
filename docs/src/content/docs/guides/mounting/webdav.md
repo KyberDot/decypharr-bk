@@ -49,8 +49,8 @@ sudo mount -t davfs -o username=USER,password=PASS \
 /webdav/
 ├── __all__/          # All torrents
 ├── __bad__/          # Failed/problematic torrents
-├── sonarr/           # Sonarr category
-├── radarr/           # Radarr category
+├── torrents/         # torrents
+├── nzbs/             # nzbs
 └── {custom}/         # Custom categories
 ```
 
