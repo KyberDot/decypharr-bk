@@ -1,8 +1,9 @@
 package server
 
 import (
-	json "github.com/bytedance/sonic"
 	"net/http"
+
+	json "github.com/bytedance/sonic"
 
 	"github.com/sirrobot01/decypharr/internal/config"
 	"golang.org/x/crypto/bcrypt"
@@ -22,7 +23,7 @@ func (s *Server) LoginHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		err := s.templates.ExecuteTemplate(w, "layout", data)
 		if err != nil {
-			s.logger.Error().Err(err).Msg("template error")
+			s.logger.Warn().Err(err).Msg("error rendering /login template")
 		}
 		return
 	}
@@ -75,7 +76,7 @@ func (s *Server) RegisterHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		err := s.templates.ExecuteTemplate(w, "layout", data)
 		if err != nil {
-			s.logger.Error().Err(err).Msg("template error")
+			s.logger.Warn().Err(err).Msg("error rendering /register template")
 		}
 		return
 	}
@@ -127,7 +128,7 @@ func (s *Server) IndexHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	err := s.templates.ExecuteTemplate(w, "layout", data)
 	if err != nil {
-		s.logger.Error().Err(err).Msg("template error")
+		s.logger.Warn().Err(err).Msg("error rendering /index template")
 	}
 }
 
@@ -149,7 +150,7 @@ func (s *Server) DownloadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	err := s.templates.ExecuteTemplate(w, "layout", data)
 	if err != nil {
-		s.logger.Error().Err(err).Msg("template error")
+		s.logger.Warn().Err(err).Msg("error rendering /download template")
 	}
 }
 
@@ -163,7 +164,7 @@ func (s *Server) RepairHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	err := s.templates.ExecuteTemplate(w, "layout", data)
 	if err != nil {
-		s.logger.Error().Err(err).Msg("template error")
+		s.logger.Warn().Err(err).Msg("error rendering /repair template")
 	}
 }
 
@@ -177,7 +178,7 @@ func (s *Server) ConfigHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	err := s.templates.ExecuteTemplate(w, "layout", data)
 	if err != nil {
-		s.logger.Error().Err(err).Msg("template error")
+		s.logger.Warn().Err(err).Msg("error rendering /config template")
 	}
 }
 
@@ -190,7 +191,7 @@ func (s *Server) StatsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	err := s.templates.ExecuteTemplate(w, "layout", data)
 	if err != nil {
-		s.logger.Error().Err(err).Msg("template error")
+		s.logger.Warn().Err(err).Msg("error rendering /stats template")
 	}
 }
 
@@ -204,6 +205,6 @@ func (s *Server) BrowseHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	err := s.templates.ExecuteTemplate(w, "layout", data)
 	if err != nil {
-		s.logger.Error().Err(err).Msg("template error")
+		s.logger.Warn().Err(err).Msg("error rendering /browse template")
 	}
 }
