@@ -61,6 +61,12 @@ type StreamingReader struct {
 	// Read position for io.Reader interface
 	readOffset atomic.Int64
 
+	// lastEndSeg is the final segment index of the most recent ReadAt,
+	// used to detect seeks (-1 until the first read). Concurrent reads from
+	// kernel readahead land within one prefetch window of each other and
+	// never trip the detector; only a genuine jump does.
+	lastEndSeg atomic.Int64
+
 	// Lifecycle
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -117,8 +123,23 @@ func NewStreamingReader(
 		logger:    logger,
 		stats:     stats,
 	}
+	sr.lastEndSeg.Store(-1)
 
 	return sr, nil
+}
+
+// seekAbandonedWindow reports whether a read landing on [startSeg, endSeg]
+// after a previous read that ended at prevEnd constitutes a seek that
+// abandons the queued read-ahead window. Reads within one prefetch window of
+// the previous position (in either direction) are sequential-ish — kernel
+// readahead reorders and overlaps small reads constantly — and keep their
+// queued hints. Anything further is a jump whose pending hints are dead
+// weight.
+func seekAbandonedWindow(prevEnd int64, startSeg, endSeg, ahead int) bool {
+	if prevEnd < 0 || ahead <= 0 {
+		return false
+	}
+	return int64(startSeg) > prevEnd+int64(ahead) || int64(endSeg) < prevEnd-int64(ahead)
 }
 
 // NewStreamingReaderWithEncryption creates an encrypted reader.
@@ -191,6 +212,15 @@ func (sr *StreamingReader) readAtPlain(ctx context.Context, p []byte, off int64)
 	// CRITICAL: Pin segments to prevent eviction during read
 	sr.cache.PinRange(startSeg, endSeg)
 	defer sr.cache.UnpinRange(startSeg, endSeg)
+
+	// On a seek, drop the read-ahead hints queued for the old position
+	// BEFORE queueing the new window — otherwise the prefetch workers spend
+	// the next seconds downloading up to a full window of data the player
+	// jumped away from while this read waits for connection slots.
+	prevEnd := sr.lastEndSeg.Swap(int64(endSeg))
+	if seekAbandonedWindow(prevEnd, startSeg, endSeg, sr.config.PrefetchAhead) {
+		sr.fetcher.CancelPendingPrefetch()
+	}
 
 	// Queue prefetch for read-ahead (non-blocking)
 	prefetchEnd := min(endSeg+sr.config.PrefetchAhead, sr.segCount-1)
