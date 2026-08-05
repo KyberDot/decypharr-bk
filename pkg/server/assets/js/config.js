@@ -127,6 +127,9 @@ class ConfigManager {
 
         // Load rclone config
         this.populateMountSettings(config.mount);
+        this.populateNFSSettings(config.nfs);
+        this.populateSMBSettings(config.smb);
+        this.populateShareCacheSettings(config.share_cache);
 
         // Load API token info
         this.populateAPIToken(config);
@@ -290,6 +293,61 @@ class ConfigManager {
         this.populateExternalRcloneSettings(mountConfig.external_rclone);
 
 
+    }
+
+    populateNFSSettings(nfsConfig) {
+        if (!nfsConfig) return;
+
+        const enabled = document.querySelector('[name="nfs.enabled"]');
+        if (enabled) enabled.checked = Boolean(nfsConfig.enabled);
+
+        for (const field of ['bind_address', 'port']) {
+            const element = document.querySelector(`[name="nfs.${field}"]`);
+            if (element && nfsConfig[field] !== undefined) {
+                element.value = nfsConfig[field];
+            }
+        }
+
+        const networks = document.querySelector('[name="nfs.allowed_networks"]');
+        if (networks && Array.isArray(nfsConfig.allowed_networks)) {
+            networks.value = nfsConfig.allowed_networks.join('\n');
+        }
+    }
+
+    populateSMBSettings(smbConfig) {
+        if (!smbConfig) return;
+
+        for (const field of ['enabled', 'require_signing']) {
+            const element = document.querySelector(`[name="smb.${field}"]`);
+            if (element) element.checked = Boolean(smbConfig[field]);
+        }
+
+        for (const field of ['bind_address', 'port', 'share_name', 'username', 'password']) {
+            const element = document.querySelector(`[name="smb.${field}"]`);
+            if (element && smbConfig[field] !== undefined) {
+                element.value = smbConfig[field];
+            }
+        }
+
+        const networks = document.querySelector('[name="smb.allowed_networks"]');
+        if (networks && Array.isArray(smbConfig.allowed_networks)) {
+            networks.value = smbConfig.allowed_networks.join('\n');
+        }
+    }
+
+    populateShareCacheSettings(cacheConfig) {
+        if (!cacheConfig) return;
+
+        const enabled = document.querySelector('[name="share_cache.enabled"]');
+        // Unset means disabled: the cache is opt-in.
+        if (enabled) enabled.checked = cacheConfig.enabled === true;
+
+        for (const field of ['dir', 'max_size', 'max_age', 'chunk_size', 'read_ahead']) {
+            const element = document.querySelector(`[name="share_cache.${field}"]`);
+            if (element && cacheConfig[field] !== undefined) {
+                element.value = cacheConfig[field];
+            }
+        }
     }
 
     populateRcloneSettings(rcloneConfig) {
@@ -1144,16 +1202,29 @@ class ConfigManager {
             }
         });
 
-        if (config.mount.type === "") {
-            errors.push('Mount type is required when ');
+        if (!config.mount.type) {
+            errors.push('Mounts: a mount type must be selected');
         }
 
-        if (config.mount.mount_path === "") {
-            errors.push('Mount path is required when Rclone is enabled');
+        // "none" runs a stub mount manager, so there is nothing to mount and no
+        // path to configure. Every other type resolves entry paths under it.
+        if (config.mount.type && config.mount.type !== 'none' && !config.mount.mount_path) {
+            errors.push('Mounts: mount path is required unless the mount type is "No Mount"');
         }
 
         if (config.repair?.enabled && !config.repair.schedule) {
             errors.push('Repair: schedule is required when Repair is enabled');
+        }
+
+        // The SMB server grants no anonymous access and refuses to start
+        // without credentials, so catch it here rather than at startup.
+        if (config.smb?.enabled) {
+            const missing = [];
+            if (!config.smb.username) missing.push('username');
+            if (!config.smb.password) missing.push('password');
+            if (missing.length) {
+                errors.push(`Shares > SMB: ${missing.join(' and ')} ${missing.length > 1 ? 'are' : 'is'} required when SMB is enabled`);
+            }
         }
         return {
             valid: errors.length === 0,
@@ -1206,6 +1277,9 @@ class ConfigManager {
 
             // Mount configuration
             mount: this.collectMountConfig(),
+            nfs: this.collectNFSConfig(),
+            smb: this.collectSMBConfig(),
+            share_cache: this.collectShareCacheConfig(),
 
             // Collect usenet configs
             usenet: this.collectUsenetConfig(),
@@ -1481,6 +1555,52 @@ class ConfigManager {
             dfs: this.collectDFSConfig(),
             rclone: this.collectRcloneConfig(),
             external_rclone: this.collectExternalRclone()
+        };
+    }
+
+    collectNFSConfig() {
+        const value = (name, fallback = '') =>
+            document.querySelector(`[name="nfs.${name}"]`)?.value || fallback;
+        const port = Number.parseInt(value('port'), 10);
+        const allowedNetworks = value('allowed_networks').split(/[\s,;]+/).filter(Boolean);
+
+        return {
+            enabled: document.querySelector('[name="nfs.enabled"]')?.checked || false,
+            bind_address: value('bind_address', '0.0.0.0'),
+            port: Number.isNaN(port) ? 20490 : port,
+            allowed_networks: allowedNetworks
+        };
+    }
+
+    collectSMBConfig() {
+        const value = (name, fallback = '') =>
+            document.querySelector(`[name="smb.${name}"]`)?.value || fallback;
+        const checked = (name) => document.querySelector(`[name="smb.${name}"]`)?.checked || false;
+        const port = Number.parseInt(value('port'), 10);
+        const allowedNetworks = value('allowed_networks').split(/[\s,;]+/).filter(Boolean);
+
+        return {
+            enabled: checked('enabled'),
+            bind_address: value('bind_address', '0.0.0.0'),
+            port: Number.isNaN(port) ? 1445 : port,
+            share_name: value('share_name', 'decypharr'),
+            username: value('username'),
+            password: value('password'),
+            require_signing: checked('require_signing'),
+            allowed_networks: allowedNetworks
+        };
+    }
+
+    collectShareCacheConfig() {
+        const value = (name) => document.querySelector(`[name="share_cache.${name}"]`)?.value?.trim() || '';
+
+        return {
+            enabled: document.querySelector('[name="share_cache.enabled"]')?.checked ?? false,
+            dir: value('dir'),
+            max_size: value('max_size'),
+            max_age: value('max_age'),
+            chunk_size: value('chunk_size'),
+            read_ahead: value('read_ahead')
         };
     }
 

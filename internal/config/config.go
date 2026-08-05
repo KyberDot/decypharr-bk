@@ -233,6 +233,9 @@ type Config struct {
 	QBitTorrent QBitTorrent `json:"qbittorrent,omitzero"` // Deprecated: use Manager instead
 	Rclone      Rclone      `json:"rclone,omitzero"`      // Deprecated: use Mounts instead
 	Mount       Mount       `json:"mount,omitzero"`
+	NFS         NFS         `json:"nfs,omitzero"`
+	SMB         SMB         `json:"smb,omitzero"`
+	ShareCache  ShareCache  `json:"share_cache,omitzero"` // Read cache shared by the NFS and SMB exports
 
 	AllowedExt         []string `json:"allowed_file_types,omitempty"`
 	AllowSamples       bool     `json:"allow_samples,omitempty"`
@@ -650,6 +653,10 @@ func (c *Config) setDefaults() {
 	if len(c.Debrids) > 0 && c.FolderNaming == "" {
 		c.FolderNaming = WebDavFolderNaming(c.Debrids[0].FolderNaming)
 	}
+
+	c.setNFSDefaults()
+	c.setSMBDefaults()
+	c.setShareCacheDefaults()
 
 	c.applyRepairDefaults()
 }

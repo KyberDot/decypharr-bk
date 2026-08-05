@@ -42,6 +42,10 @@ type Client struct {
 
 	retries int // Number of retries per provider for transient errors
 
+	// slotFreed is poked (non-blocking, buffered 1) whenever any pool slot
+	// is released; waitForConnection parks on it.
+	slotFreed chan struct{}
+
 	closed atomic.Bool
 	// Speed test results storage
 	speedTestResults *xsync.Map[string, SpeedTestResult]
@@ -249,6 +253,7 @@ func NewClient(cfg *config.Config) (*Client, error) {
 		providers:        providers,
 		retries:          cfg.Retries,
 		logger:           logger.New("nntp-client"),
+		slotFreed:        make(chan struct{}, 1),
 		speedTestResults: xsync.NewMap[string, SpeedTestResult](),
 		sockReadBuf:      parseSockBuf(cfg.Usenet.SocketReadBuffer),
 		sockWriteBuf:     parseSockBuf(cfg.Usenet.SocketWriteBuffer),
@@ -278,6 +283,17 @@ func NewClient(cfg *config.Config) (*Client, error) {
 	return cm, nil
 }
 
+// releaseSlot frees one slot on pp and pokes any acquirer parked in
+// waitForConnection. Every slot release must go through here, or a parked
+// acquirer waits out its fallback tick.
+func (c *Client) releaseSlot(pp *ProviderPool) {
+	<-pp.slots
+	select {
+	case c.slotFreed <- struct{}{}:
+	default:
+	}
+}
+
 // put returns a connection to the pool and releases the slot.
 func (c *Client) put(conn *Connection, provider config.UsenetProvider) {
 	if conn == nil {
@@ -295,13 +311,13 @@ func (c *Client) put(conn *Connection, provider config.UsenetProvider) {
 	// Don't return closed connections to pool
 	if conn.IsClosed() {
 		_ = conn.Close()
-		<-pp.slots // Release slot
+		c.releaseSlot(pp)
 		return
 	}
 
 	if c.closed.Load() {
 		_ = conn.Close()
-		<-pp.slots // Release slot
+		c.releaseSlot(pp)
 		return
 	}
 
@@ -312,13 +328,13 @@ func (c *Client) put(conn *Connection, provider config.UsenetProvider) {
 	if len(pp.conns) >= pp.max {
 		pp.mu.Unlock()
 		_ = conn.Close()
-		<-pp.slots // Release slot
+		c.releaseSlot(pp)
 		return
 	}
 	pp.conns = append(pp.conns, entry) // Push to stack
 	pp.mu.Unlock()
 
-	<-pp.slots // Release slot - connection is now available for reuse
+	c.releaseSlot(pp) // connection is now available for reuse
 }
 
 // release closes a connection without returning it (for error cases)
@@ -327,7 +343,7 @@ func (c *Client) release(conn *Connection) {
 		_ = conn.Close()
 		if pp, ok := c.pools[conn.address]; ok {
 			pp.activeConns.Delete(conn) // Deregister from active tracking
-			<-pp.slots                  // Release slot
+			c.releaseSlot(pp)
 		}
 	}
 }
@@ -495,9 +511,19 @@ func (c *Client) ExecuteWithFailover(ctx context.Context, fn func(conn *Connecti
 	}
 
 	if lastErr != nil {
-		return lastErr
+		return fmt.Errorf("%w: %w", ErrAllProvidersFailed, lastErr)
 	}
-	return errors.New("all providers failed")
+	return ErrAllProvidersFailed
+}
+
+// ErrAllProvidersFailed marks an error returned after ExecuteWithFailover
+// exhausted both its per-provider retries and provider failover; outer retry
+// loops should not multiply attempts on it.
+var ErrAllProvidersFailed = errors.New("all providers failed")
+
+// IsAllProvidersFailed reports whether err carries ErrAllProvidersFailed.
+func IsAllProvidersFailed(err error) bool {
+	return errors.Is(err, ErrAllProvidersFailed)
 }
 
 // returnOrReleaseConn returns a connection to the pool or releases it if closed
@@ -523,7 +549,7 @@ func (c *Client) getConnectionFromProvider(ctx context.Context, provider config.
 	case pp.slots <- struct{}{}:
 		conn, err := c.getOrCreateFromPool(ctx, pp, provider)
 		if err != nil {
-			<-pp.slots
+			c.releaseSlot(pp)
 			return nil, provider, err
 		}
 		return conn, provider, nil
@@ -588,8 +614,8 @@ func (c *Client) getAnyAvailableConnection(ctx context.Context, exclusions provi
 			// Got a slot - try to get or create connection
 			conn, err := c.getOrCreateFromPool(ctx, pp, provider)
 			if err != nil {
-				<-pp.slots // Release slot on error
-				continue   // Try next provider
+				c.releaseSlot(pp) // Release slot on error
+				continue          // Try next provider
 			}
 			return conn, provider, nil
 		default:
@@ -602,134 +628,60 @@ func (c *Client) getAnyAvailableConnection(ctx context.Context, exclusions provi
 		return nil, config.UsenetProvider{}, errors.New("no eligible providers available")
 	}
 
-	// Phase 2: All providers in this tier busy - race for first available
-	// slot in the tier. When the primary tier is in use this is the wait
-	// that lets a backup remain idle rather than getting roped in.
+	// Phase 2: All providers in this tier busy - block until a slot frees.
+	// When the primary tier is in use this is the wait that lets a backup
+	// remain idle rather than getting roped in.
 	eligible := make([]config.UsenetProvider, 0, eligibleCount)
 	for _, provider := range c.providers {
 		if provider.Backup == useBackups && !exclusions.excludes(provider) {
 			eligible = append(eligible, provider)
 		}
 	}
-	return c.raceForConnection(ctx, eligible)
+	return c.waitForConnection(ctx, eligible)
 }
 
-// raceForConnection spawns goroutines that race to acquire a connection slot.
-// Returns as soon as any provider has availability.
-//
-// Each goroutine reports exactly one result (success or error) via resultCh, or
-// exits silently if it never acquired a slot. A WaitGroup + channel-close ensures
-// the receiver loop always terminates, and any extra connections won by multiple
-// goroutines are properly returned to the pool — preventing slot leaks under heavy
-// concurrent import load.
-func (c *Client) raceForConnection(ctx context.Context, eligible []config.UsenetProvider) (*Connection, config.UsenetProvider, error) {
-	type result struct {
-		conn     *Connection
-		provider config.UsenetProvider
-		err      error
-	}
+// waitForConnection blocks until a slot frees on any eligible provider, then
+// acquires it: scan all eligible pools non-blocking; if none has a slot, park
+// on slotFreed and re-scan. Spurious wakeups just cost a scan; fairness is
+// best-effort.
+func (c *Client) waitForConnection(ctx context.Context, eligible []config.UsenetProvider) (*Connection, config.UsenetProvider, error) {
+	// The fallback tick guards against a slot release that bypasses
+	// releaseSlot turning into an indefinite park.
+	const wakeFallback = 250 * time.Millisecond
+	timer := time.NewTimer(wakeFallback)
+	defer timer.Stop()
 
-	innerCtx, cancel := context.WithCancel(ctx)
-
-	// Buffer for all possible results — goroutines that win the slot race send here.
-	resultCh := make(chan result, len(eligible))
-	var wg sync.WaitGroup
-
-	for _, provider := range eligible {
-		wg.Add(1)
-		go func(p config.UsenetProvider) {
-			defer wg.Done()
-			pp := c.pools[p.Host]
-
-			// Block waiting for slot (respects context)
+	var lastErr error
+	for {
+		busy := 0
+		failed := 0
+		for _, provider := range eligible {
+			pp := c.pools[provider.Host]
 			select {
 			case pp.slots <- struct{}{}:
-				// Got slot
-			case <-innerCtx.Done():
-				return // Context cancelled before we got a slot — no send needed
-			}
-
-			// Check if context was cancelled while we were waiting
-			if innerCtx.Err() != nil {
-				<-pp.slots // Release slot
-				return
-			}
-
-			// Try to get or create connection
-			conn, err := c.getOrCreateFromPool(innerCtx, pp, p)
-			if err != nil {
-				<-pp.slots // Release slot on error
-				select {
-				case resultCh <- result{nil, p, err}:
-				case <-innerCtx.Done():
+				conn, err := c.getOrCreateFromPool(ctx, pp, provider)
+				if err != nil {
+					c.releaseSlot(pp)
+					lastErr = err
+					failed++
+					continue
 				}
-				return
+				return conn, provider, nil
+			default:
+				busy++
 			}
+		}
+		// Every provider had a free slot and failed to produce a connection:
+		// surface the error instead of spinning on dial failures.
+		if busy == 0 && failed > 0 {
+			return nil, config.UsenetProvider{}, lastErr
+		}
 
-			// Send the result; if the inner context was already cancelled (another
-			// goroutine won), return our connection to the pool immediately.
-			select {
-			case resultCh <- result{conn, p, nil}:
-				// Slot is still held — the receiver will call returnOrReleaseConn.
-			case <-innerCtx.Done():
-				c.put(conn, p) // releases slot
-			}
-		}(provider)
-	}
-
-	// Close resultCh once all goroutines have finished so the receiver loop below
-	// can terminate without needing an explicit count.
-	go func() {
-		wg.Wait()
-		close(resultCh)
-		cancel()
-	}()
-
-	// Drain all results:
-	//  - First success becomes the winner; cancel() is called to stop remaining goroutines.
-	//  - Any subsequent successes (from goroutines that raced to completion before cancel
-	//    reached them) have their connections returned to the pool to prevent slot leaks.
-	//  - Errors are collected so we can return a meaningful error if there is no winner.
-	var winConn *Connection
-	var winProvider config.UsenetProvider
-	var lastErr error
-
-	for {
+		timer.Reset(wakeFallback)
 		select {
-		case r, ok := <-resultCh:
-			if !ok {
-				// Channel closed — all goroutines have finished.
-				if winConn != nil {
-					return winConn, winProvider, nil
-				}
-				if lastErr != nil {
-					return nil, config.UsenetProvider{}, lastErr
-				}
-				return nil, config.UsenetProvider{}, errors.New("failed to get connection from any provider")
-			}
-			if r.err == nil && r.conn != nil {
-				if winConn == nil {
-					winConn = r.conn
-					winProvider = r.provider
-					cancel() // Tell losing goroutines to stop ASAP.
-				} else {
-					// Extra winner arrived before cancel propagated — release it.
-					c.returnOrReleaseConn(r.conn, r.provider)
-				}
-			} else if r.err != nil {
-				lastErr = r.err
-			}
+		case <-c.slotFreed:
+		case <-timer.C:
 		case <-ctx.Done():
-			// Parent context cancelled — cancel inner, drain remaining connections
-			// in background so we don't block the caller.
-			cancel()
-			go func() {
-				for r := range resultCh {
-					if r.conn != nil {
-						c.returnOrReleaseConn(r.conn, r.provider)
-					}
-				}
-			}()
 			return nil, config.UsenetProvider{}, ctx.Err()
 		}
 	}
@@ -877,8 +829,11 @@ func (c *Client) createConnection(ctx context.Context, provider config.UsenetPro
 		}
 	}
 
-	reader := bufio.NewReaderSize(netConn, 512*1024)
-	writer := bufio.NewWriterSize(netConn, 64*1024)
+	// The reader matches the 128KB chunks the body copier consumes (the
+	// socket buffer, not bufio, is the RTT window); the writer carries only
+	// short command lines.
+	reader := bufio.NewReaderSize(netConn, 128*1024)
+	writer := bufio.NewWriterSize(netConn, 4*1024)
 
 	conn := &Connection{
 		conn:     netConn,
@@ -918,6 +873,10 @@ func (c *Client) createConnection(ctx context.Context, provider config.UsenetPro
 	// Clear deadline for normal operation
 	_ = netConn.SetDeadline(time.Time{})
 
+	// Registered with the body-idle janitor for the connection's lifetime;
+	// idleNS=0 disarms it whenever no body copy is in flight.
+	bodyIdleJanitor.add(conn)
+
 	return conn, nil
 }
 
@@ -939,13 +898,19 @@ func (c *Client) reapIdleConnections() {
 	for _, pp := range c.pools {
 		var toClose, toPing []*connectionEntry
 
+		// Cap how many entries one sweep may hold slots for: after a playback
+		// pause every pooled connection crosses pingInterval in the same
+		// sweep, and pinging them all at once would leave a resuming reader
+		// with no free slots. The remainder is pinged on later sweeps.
+		maxPing := max(1, pp.max/4)
+
 		pp.mu.Lock()
 		kept := pp.conns[:0]
 		for _, entry := range pp.conns {
 			switch {
 			case c.isIdleExpired(entry.lastUsed, now):
 				toClose = append(toClose, entry)
-			case now.Sub(entry.lastActivity()) > c.pingInterval:
+			case now.Sub(entry.lastActivity()) > c.pingInterval && len(toPing) < maxPing:
 				// Candidate for a keepalive ping. Take a connection slot so
 				// the provider's total stays capped while the entry is out of
 				// the pool being pinged — otherwise a checkout burst could
@@ -974,10 +939,26 @@ func (c *Client) reapIdleConnections() {
 			releaseConnectionEntry(entry)
 			_ = conn.Close()
 		}
-		// Ping outside the pool lock — a DATE round-trip per connection must
-		// not block checkouts.
-		for _, entry := range toPing {
-			c.keepAlive(pp, entry, now)
+		// Ping outside the pool lock, in parallel, so slot-held time stays
+		// one round-trip rather than the whole batch's.
+		if len(toPing) > 0 {
+			var wg sync.WaitGroup
+			workers := min(len(toPing), 4)
+			pingCh := make(chan *connectionEntry, len(toPing))
+			for _, entry := range toPing {
+				pingCh <- entry
+			}
+			close(pingCh)
+			for range workers {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for entry := range pingCh {
+						c.keepAlive(pp, entry, now)
+					}
+				}()
+			}
+			wg.Wait()
 		}
 	}
 }
@@ -991,7 +972,7 @@ func (c *Client) keepAlive(pp *ProviderPool, entry *connectionEntry, now time.Ti
 		conn := entry.conn
 		releaseConnectionEntry(entry)
 		_ = conn.Close()
-		<-pp.slots // Release slot
+		c.releaseSlot(pp)
 	}
 
 	if err := entry.conn.ping(); err != nil {
@@ -1010,7 +991,7 @@ func (c *Client) keepAlive(pp *ProviderPool, entry *connectionEntry, now time.Ti
 	}
 	pp.conns = append(pp.conns, entry)
 	pp.mu.Unlock()
-	<-pp.slots // Release slot - connection is available again
+	c.releaseSlot(pp) // connection is available again
 }
 
 // Stats returns current pool statistics

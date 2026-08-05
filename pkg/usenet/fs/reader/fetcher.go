@@ -81,11 +81,14 @@ func NewSegmentFetcher(
 		cancel:         cancel,
 	}
 
-	// Start fewer prefetch workers than foreground connection slots. Seeky
-	// callers such as ffprobe can jump to the tail while head read-ahead is
-	// still running; reserving at least one slot prevents background prefetch
-	// from starving the blocking read that the caller is waiting on.
-	numPrefetchWorkers := maxConns - 1
+	// Start fewer prefetch workers than foreground connection slots: seeky
+	// callers such as ffprobe jump while read-ahead is still in flight, and
+	// reserving two slots keeps a post-seek foreground read from queueing
+	// behind the prefetch fleet.
+	numPrefetchWorkers := 0
+	if maxConns >= 2 {
+		numPrefetchWorkers = max(1, maxConns-2)
+	}
 	if numPrefetchWorkers > 0 {
 		for i := range numPrefetchWorkers {
 			sf.prefetchWg.Add(1)
@@ -449,6 +452,12 @@ func (sf *SegmentFetcher) fetchWithRetry(ctx context.Context, segIdx int) error 
 
 		// Don't retry permanent errors or cancellations.
 		if nntp.IsArticleNotFoundError(err) || ctx.Err() != nil || sf.ctx.Err() != nil {
+			return err
+		}
+		// The failover layer already retried per provider and across
+		// providers for this error; allow one outer pass for transient
+		// blips, then stop rather than multiplying the attempt budget.
+		if nntp.IsAllProvidersFailed(err) && attempt >= 1 {
 			return err
 		}
 	}

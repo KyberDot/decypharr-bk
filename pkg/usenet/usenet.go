@@ -21,6 +21,7 @@ import (
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	"github.com/sirrobot01/decypharr/pkg/usenet/fs"
+	"github.com/sirrobot01/decypharr/pkg/usenet/fs/reader"
 	"github.com/sirrobot01/decypharr/pkg/usenet/parser"
 	"github.com/sirrobot01/decypharr/pkg/usenet/types"
 )
@@ -29,28 +30,29 @@ const (
 	bufferSize = 256 * 1024 // 256KB buffer for streaming
 )
 
+// streamBufferPool stores *[]byte so Put does not box the slice header.
 var streamBufferPool = sync.Pool{
 	New: func() any {
-		return make([]byte, bufferSize)
+		buf := make([]byte, bufferSize)
+		return &buf
 	},
 }
 
-func acquireStreamBuffer() []byte {
-	buf := streamBufferPool.Get().([]byte)
-	if cap(buf) < bufferSize {
-		buf = make([]byte, bufferSize)
+func acquireStreamBuffer() *[]byte {
+	bufPtr := streamBufferPool.Get().(*[]byte)
+	if cap(*bufPtr) < bufferSize {
+		buf := make([]byte, bufferSize)
+		return &buf
 	}
-	return buf[:bufferSize]
+	*bufPtr = (*bufPtr)[:bufferSize]
+	return bufPtr
 }
 
-func releaseStreamBuffer(buf []byte) {
-	if buf == nil {
+func releaseStreamBuffer(buf *[]byte) {
+	if buf == nil || cap(*buf) < bufferSize {
 		return
 	}
-	if cap(buf) < bufferSize {
-		return
-	}
-	streamBufferPool.Put(buf[:bufferSize])
+	streamBufferPool.Put(buf)
 }
 
 type fsEntry struct {
@@ -167,15 +169,33 @@ func (n *noPrefetchReader) Prefetch(ctx context.Context, off, length int64) {
 	// No-op for multi-volume readers
 }
 
+// OpenCursor returns a pass-through cursor: multi-volume readers have no
+// shared prefetch/eviction state to isolate per consumer.
+func (n *noPrefetchReader) OpenCursor() reader.ReadCursor {
+	return passthroughCursor{r: n}
+}
+
+type passthroughCursor struct {
+	r fs.PrefetchableReaderAt
+}
+
+func (c passthroughCursor) ReadAtContext(ctx context.Context, p []byte, off int64) (int, error) {
+	return c.r.ReadAtContext(ctx, p, off)
+}
+func (c passthroughCursor) Prefetch(ctx context.Context, off, length int64) {
+	c.r.Prefetch(ctx, off, length)
+}
+func (c passthroughCursor) Close() {}
+
 type contextSectionReader struct {
 	ctx   context.Context
-	r     fs.PrefetchableReaderAt
+	r     reader.ReadCursor
 	base  int64
 	limit int64
 	off   int64
 }
 
-func newContextSectionReader(ctx context.Context, r fs.PrefetchableReaderAt, off, length int64) *contextSectionReader {
+func newContextSectionReader(ctx context.Context, r reader.ReadCursor, off, length int64) *contextSectionReader {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -731,6 +751,83 @@ func (u *Usenet) preStreamChecks(file *storage.NZBFile) error {
 	return nil
 }
 
+// FileHandle is a pull-based handle over one usenet file, backed by the
+// entry's shared reader through a private cursor. It holds the entry
+// refcount for its lifetime (blocking idle teardown) and releases it on
+// Close.
+type FileHandle struct {
+	u      *Usenet
+	key    string
+	entry  *fsEntry
+	cursor reader.ReadCursor
+	size   int64
+	closed atomic.Bool
+}
+
+// OpenFile opens a pull-based handle for one file of an NZB. The returned
+// handle must be Closed; it pins the underlying fs entry (and its reader)
+// while open.
+func (u *Usenet) OpenFile(ctx context.Context, nzoID, filename string) (*FileHandle, error) {
+	entry, key, err := u.getOrCreateEntry(ctx, nzoID, filename)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get or create file system: %w", err)
+	}
+	readerAt, size, err := entry.getOrCreateReader()
+	if err != nil {
+		u.releaseFS(key)
+		return nil, fmt.Errorf("failed to get reader: %w", err)
+	}
+	return &FileHandle{
+		u:      u,
+		key:    key,
+		entry:  entry,
+		cursor: readerAt.OpenCursor(),
+		size:   size,
+	}, nil
+}
+
+// Size returns the underlying volume size in bytes.
+func (h *FileHandle) Size() int64 { return h.size }
+
+// ReadAtContext reads at off through the handle's cursor. Article-not-found
+// is surfaced as a permanent error and remembered, matching Stream.
+func (h *FileHandle) ReadAtContext(ctx context.Context, p []byte, off int64) (int, error) {
+	if h.closed.Load() {
+		return 0, io.ErrClosedPipe
+	}
+	h.entry.lastAccessed.Store(utils.NowUnix())
+	n, err := h.cursor.ReadAtContext(ctx, p, off)
+	if err != nil && ctx != nil && ctx.Err() != nil {
+		return n, ctx.Err()
+	}
+	if err != nil && nntp.IsArticleNotFoundError(err) {
+		h.u.failedFiles.Store(h.key, err)
+		return n, customerror.NewArticleNotFoundError(err)
+	}
+	return n, err
+}
+
+// Prefetch queues a bounded read-ahead window from off without blocking.
+func (h *FileHandle) Prefetch(ctx context.Context, off, length int64) {
+	if h.closed.Load() {
+		return
+	}
+	if h.u.prefetchSize > 0 && length > h.u.prefetchSize {
+		length = h.u.prefetchSize
+	}
+	h.cursor.Prefetch(ctx, off, length)
+}
+
+// Close releases the cursor and the entry reference. Idempotent.
+func (h *FileHandle) Close() error {
+	if !h.closed.CompareAndSwap(false, true) {
+		return nil
+	}
+	h.cursor.Close()
+	h.u.releaseFS(h.key)
+	return nil
+}
+
 // Stream streams a file using the new streaming system with caching and worker limiting
 func (u *Usenet) Stream(ctx context.Context, nzoID, filename string, start, end int64, writer io.Writer) error {
 	if start < 0 {
@@ -786,14 +883,18 @@ func (u *Usenet) Stream(ctx context.Context, nzoID, filename string, start, end 
 	if u.prefetchSize > 0 && prefetchLen > u.prefetchSize {
 		prefetchLen = u.prefetchSize
 	}
-	readerAt.Prefetch(ctx, rangeStart, prefetchLen)
 
-	section := newContextSectionReader(ctx, readerAt, rangeStart, length)
-	buf := acquireStreamBuffer()
-	defer releaseStreamBuffer(buf)
+	// Each Stream call is one consumer with its own cursor.
+	cursor := readerAt.OpenCursor()
+	defer cursor.Close()
+	cursor.Prefetch(ctx, rangeStart, prefetchLen)
+
+	section := newContextSectionReader(ctx, cursor, rangeStart, length)
+	bufPtr := acquireStreamBuffer()
+	defer releaseStreamBuffer(bufPtr)
 
 	// Use a safe copy loop that checks context and validates read counts
-	_, err = safeCopyBuffer(ctx, writer, section, buf)
+	_, err = safeCopyBuffer(ctx, writer, section, *bufPtr)
 
 	// Handle context cancellation explicitly
 	if err != nil && ctx.Err() != nil {
@@ -813,13 +914,10 @@ func (u *Usenet) Stream(ctx context.Context, nzoID, filename string, start, end 
 // safeCopyBuffer copies from src to dst using buf, with context checking and
 // validation of read counts to prevent panics from corrupted readers during shutdown.
 func safeCopyBuffer(ctx context.Context, dst io.Writer, src io.Reader, buf []byte) (written int64, err error) {
-	var release func()
 	if len(buf) == 0 {
-		buf = acquireStreamBuffer()
-		release = func() { releaseStreamBuffer(buf) }
-	}
-	if release != nil {
-		defer release()
+		bufPtr := acquireStreamBuffer()
+		defer releaseStreamBuffer(bufPtr)
+		buf = *bufPtr
 	}
 	bufLen := len(buf)
 

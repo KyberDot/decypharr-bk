@@ -123,9 +123,9 @@ func New() *Manager {
 		DisableCompression:     false, // Enable compression for better multiplexing
 		DialContext:            dialer.DialContext,
 		Proxy:                  http.ProxyFromEnvironment,
-		MaxResponseHeaderBytes: 1 << 20,  // 1MB header buffer for CDN responses
-		WriteBufferSize:        32 << 10, // 32KB write buffer
-		ReadBufferSize:         32 << 10, // 32KB read buffer
+		MaxResponseHeaderBytes: 1 << 20,   // 1MB header buffer for CDN responses
+		WriteBufferSize:        32 << 10,  // requests are tiny
+		ReadBufferSize:         256 << 10, // caps how much a single body.Read can return
 	}
 
 	streamClient := &http.Client{
