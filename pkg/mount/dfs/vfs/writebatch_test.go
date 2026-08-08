@@ -102,6 +102,25 @@ func TestCopyBatchedFlushesTailOnEOF(t *testing.T) {
 	}
 }
 
+// overReadingReader reports more bytes than the slice it was given, the way a
+// segment table with overlapping ranges used to.
+type overReadingReader struct{}
+
+func (overReadingReader) Read(p []byte) (int, error) { return 2 * len(p), nil }
+
+func TestCopyBatchedRejectsOverRead(t *testing.T) {
+	dst := &recordingWriter{}
+	buf := make([]byte, downloadBatchSize)
+
+	err := copyBatched(dst, overReadingReader{}, 4<<20, buf, func() bool { return false })
+	if err == nil {
+		t.Fatal("expected an error from a reader that over-reports")
+	}
+	if len(dst.sizes) != 0 {
+		t.Fatalf("expected no writes, got %v", dst.sizes)
+	}
+}
+
 func TestCopyBatchedStopsOnWriteError(t *testing.T) {
 	src := &chunkReader{readSize: 32 << 10, total: 4 << 20}
 	dst := &recordingWriter{err: io.EOF} // skip-stop signal from cacheWriter

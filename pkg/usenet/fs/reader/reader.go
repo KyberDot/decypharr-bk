@@ -396,6 +396,9 @@ func (sr *StreamingReader) readAtPlain(ctx context.Context, cur *Cursor, p []byt
 // progressive performance degradation on large files.
 func (sr *StreamingReader) readFromCache(ctx context.Context, p []byte, off int64, startSeg, endSeg int) (int, error) {
 	totalRead := 0
+	// filled is the absolute offset this read has delivered through. Segments
+	// must cover disjoint, ascending ranges; see the overlap check below.
+	filled := off
 
 	for segIdx := startSeg; segIdx <= endSeg; segIdx++ {
 		// Wait for segment to be ready
@@ -412,6 +415,14 @@ func (sr *StreamingReader) readFromCache(ctx context.Context, p []byte, off int6
 
 		if readStart >= readEnd {
 			continue
+		}
+		if readStart < filled {
+			// Two segments claim the same bytes. Their copies would land on
+			// top of each other in p while totalRead counted both, so the
+			// read would report more bytes than p can hold and panic the
+			// caller's copy loop. computeOffsets rejects such tables up
+			// front; anything reaching here is a bug, not bad metadata.
+			return totalRead, fmt.Errorf("segment %d starts at %d, behind delivered offset %d", segIdx, readStart, filled)
 		}
 
 		outOffset := readStart - off
@@ -439,6 +450,7 @@ func (sr *StreamingReader) readFromCache(ctx context.Context, p []byte, off int6
 		}
 
 		totalRead += n
+		filled = readEnd
 	}
 
 	return totalRead, nil

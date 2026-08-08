@@ -235,7 +235,7 @@ func NewSegmentCache(
 // computeOffsets calculates cumulative byte offsets for segment lookup.
 func computeOffsets(segments []SegmentMeta) []int64 {
 	offsets := make([]int64, len(segments)+1)
-	if len(segments) > 0 && segments[0].EndOffset > 0 {
+	if len(segments) > 0 && segments[0].EndOffset > 0 && offsetsAscend(segments) {
 		for i, seg := range segments {
 			offsets[i] = seg.StartOffset
 		}
@@ -255,6 +255,23 @@ func computeOffsets(segments []SegmentMeta) []int64 {
 		offsets[len(segments)] = cumulative
 	}
 	return offsets
+}
+
+// offsetsAscend reports whether the stored segment offsets cover disjoint,
+// ascending byte ranges. binarySearchSegment and readFromCache both depend on
+// that; a table that breaks it makes reads double-count bytes and report more
+// than the caller's buffer holds. Parsing rejects such files now, but .meta
+// written by older versions can still carry zero-filled or out-of-order slots,
+// so offsets from metadata are only used when they hold up. The cumulative
+// fallback stays self-consistent: every read and write goes through
+// segOffsets.
+func offsetsAscend(segments []SegmentMeta) bool {
+	for i := 1; i < len(segments); i++ {
+		if segments[i].StartOffset <= segments[i-1].EndOffset {
+			return false
+		}
+	}
+	return segments[len(segments)-1].EndOffset >= segments[len(segments)-1].StartOffset-1
 }
 
 // ReadRangeInto is the zero-amplification read path: copies only the

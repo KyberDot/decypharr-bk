@@ -206,6 +206,13 @@ func copyBatched(dst io.Writer, src io.Reader, size int64, buf []byte, flushNow 
 	for remaining > 0 {
 		want := min(int64(len(buf)-fill), remaining)
 		n, rerr := src.Read(buf[fill : fill+int(want)])
+		if n > int(want) {
+			// A Reader that reports more bytes than the slice it was handed
+			// would make the write below slice past the batch buffer and
+			// panic the process (this goroutine has no recover). Fail the
+			// chunk instead and let the retry path deal with it.
+			return fmt.Errorf("stream read returned %d bytes for a %d-byte buffer", n, want)
+		}
 		fill += n
 		remaining -= int64(n)
 		if rerr != nil || fill == len(buf) || remaining == 0 || flushNow() {
