@@ -519,7 +519,7 @@ func (tb *Torbox) GetTorrents() ([]*types.Torrent, error) {
 	for {
 		torrents, err := tb.getTorrents(offset)
 		if err != nil {
-			break
+			return nil, fmt.Errorf("get TorBox torrents at offset %d: %w", offset, err)
 		}
 		if len(torrents) == 0 {
 			break
@@ -533,7 +533,10 @@ func (tb *Torbox) GetTorrents() ([]*types.Torrent, error) {
 func (tb *Torbox) getTorrents(offset int) ([]*types.Torrent, error) {
 	var res TorrentsListResponse
 
-	resp, err := tb.doGet("/api/torrents/mylist", map[string]string{"offset": fmt.Sprintf("%d", offset)}, &res)
+	resp, err := tb.doGet("/api/torrents/mylist", map[string]string{
+		"bypass_cache": "true",
+		"offset":       strconv.Itoa(offset),
+	}, &res)
 	if err != nil {
 		return nil, err
 	}
