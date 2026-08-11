@@ -40,7 +40,13 @@ type RepairRunOptions struct {
 	IgnoreLastChecked bool
 	AutoRepair        *bool
 	UnrestrictLink    bool
-	ProtocolScope     string
+	// VerifyContent additionally head-verifies each NZB media file through
+	// the serving stack (container-signature check). Catches files whose
+	// articles all exist but were assembled wrong — invisible to the default
+	// STAT probe. Costs one article download per file. nil falls back to the
+	// configured repair.verify_content setting.
+	VerifyContent *bool
+	ProtocolScope string
 }
 
 type ClearRepairStateResult struct {
@@ -437,6 +443,10 @@ func (r *Repair) runSweep(trigger storage.RepairRunTrigger, opts RepairRunOption
 	if !cfg.Enabled && trigger == storage.RepairTriggerScheduled {
 		return "", errors.New("repair disabled")
 	}
+	if opts.VerifyContent == nil {
+		v := cfg.VerifyContent
+		opts.VerifyContent = &v
+	}
 
 	r.mu.Lock()
 	if r.activeRunID != "" {
@@ -460,6 +470,9 @@ func (r *Repair) runSweep(trigger storage.RepairRunTrigger, opts RepairRunOption
 	}
 	if opts.UnrestrictLink {
 		sourceParts = append(sourceParts, "unrestrict-link")
+	}
+	if opts.VerifyContent != nil && *opts.VerifyContent {
+		sourceParts = append(sourceParts, "verify-content")
 	}
 	if scope := normalizeRepairProtocolScope(opts.ProtocolScope); scope != "" {
 		sourceParts = append(sourceParts, "protocol-"+scope)

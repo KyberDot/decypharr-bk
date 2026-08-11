@@ -398,25 +398,35 @@ func (r *Repair) probeFile(ctx context.Context, item *storage.EntryItem, name st
 	}
 
 	if entry.IsNZB() {
-		return r.probeNZBFile(ctx, entry, name, res)
+		return r.probeNZBFile(ctx, entry, name, res, opts)
 	}
 	return r.probeTorrentFile(ctx, entry, file, name, res, opts)
 }
 
-func (r *Repair) probeNZBFile(ctx context.Context, entry *storage.Entry, name string, res fileResult) fileResult {
+func (r *Repair) probeNZBFile(ctx context.Context, entry *storage.Entry, name string, res fileResult, opts RepairRunOptions) fileResult {
 	if r.manager.usenet == nil {
 		res.reason = "usenet_client_not_configured"
 		return res
 	}
 	err := r.manager.usenet.CheckFile(ctx, entry.InfoHash, name)
+	if err == nil && opts.VerifyContent != nil && *opts.VerifyContent {
+		// Deep probe: the STAT check passes NZBs whose articles all exist but
+		// were assembled wrong (e.g. RAR volumes out of order). Reading the
+		// file head through the serving stack catches those.
+		err = r.manager.usenet.VerifyFile(ctx, entry.InfoHash, name)
+	}
 	if err == nil {
 		res.healthy = true
 		return res
 	}
-	if errors.Is(err, customerror.UsenetSegmentMissingError) {
+	switch {
+	case errors.Is(err, customerror.UsenetSegmentMissingError):
 		res.broken = true
 		res.reason = "usenet_segment_missing"
-	} else {
+	case errors.Is(err, customerror.UsenetCorruptContentError):
+		res.broken = true
+		res.reason = "usenet_corrupt_content"
+	default:
 		res.reason = "usenet_probe_error"
 	}
 	return res

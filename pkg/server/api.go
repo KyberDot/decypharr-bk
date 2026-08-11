@@ -672,6 +672,7 @@ func (s *Server) handleRunRepair(w http.ResponseWriter, r *http.Request) {
 		Force             bool   `json:"force,omitempty"`
 		AutoRepair        *bool  `json:"auto_repair,omitempty"`
 		UnrestrictLink    bool   `json:"unrestrict_link,omitempty"`
+		VerifyContent     *bool  `json:"verify_content,omitempty"`
 		Protocol          string `json:"protocol,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
@@ -705,6 +706,15 @@ func (s *Server) handleRunRepair(w http.ResponseWriter, r *http.Request) {
 	case "0", "false", "no", "off":
 		unrestrictLink = false
 	}
+	verifyContent := req.VerifyContent
+	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("verify_content"))) {
+	case "1", "true", "yes", "on":
+		v := true
+		verifyContent = &v
+	case "0", "false", "no", "off":
+		v := false
+		verifyContent = &v
+	}
 	protocolScope := strings.ToLower(strings.TrimSpace(req.Protocol))
 	if queryProtocol := strings.TrimSpace(r.URL.Query().Get("protocol")); queryProtocol != "" {
 		protocolScope = strings.ToLower(queryProtocol)
@@ -728,6 +738,7 @@ func (s *Server) handleRunRepair(w http.ResponseWriter, r *http.Request) {
 		IgnoreLastChecked: ignoreLastChecked,
 		AutoRepair:        autoRepair,
 		UnrestrictLink:    unrestrictLink,
+		VerifyContent:     verifyContent,
 		ProtocolScope:     protocolScope,
 	})
 	if err != nil {

@@ -226,6 +226,12 @@ type RepairConfig struct {
 	AutoRepair            bool         `json:"auto_repair,omitempty"`
 	SkipNZBRepair         bool         `json:"skip_nzb_repair,omitempty"`
 
+	// VerifyContent makes NZB probes also read each media file's head through
+	// the streaming stack and check for a valid container signature, catching
+	// files whose articles exist but were assembled wrong. Costs one article
+	// download per file probed.
+	VerifyContent bool `json:"verify_content,omitempty"`
+
 	// StopSchedule, when set, stops an in-progress repair sweep at this time/interval
 	// (same formats as Schedule: clock time, cron expression, or duration).
 	// A repair sweep still running when StopSchedule fires is cancelled before it

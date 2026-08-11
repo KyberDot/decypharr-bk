@@ -333,7 +333,10 @@ func (u *Usenet) initStreamsDir(streamsDir string) {
 	}
 }
 
-func (u *Usenet) createEntry(file *storage.NZBFile) (*fsEntry, error) {
+// createEntry builds a standalone fs entry for one file. prefetchSize sets the
+// reader's read-ahead window; pass 0 for one-shot reads (head verification) so
+// a single small read doesn't queue a full window of article downloads.
+func (u *Usenet) createEntry(file *storage.NZBFile, prefetchSize int64) (*fsEntry, error) {
 	volumes := GetFileVolumes(file)
 	if len(volumes) == 0 {
 		return nil, fmt.Errorf("no volumes available for file %s", file.Name)
@@ -341,7 +344,7 @@ func (u *Usenet) createEntry(file *storage.NZBFile) (*fsEntry, error) {
 
 	fsCtx := context.Background()
 
-	usenetFS, err := fs.NewFS(fsCtx, u.nntp, u.maxConnections, u.prefetchSize, volumes, u.logger)
+	usenetFS, err := fs.NewFS(fsCtx, u.nntp, u.maxConnections, prefetchSize, volumes, u.logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create usenet FS: %w", err)
 	}
@@ -376,7 +379,7 @@ func (u *Usenet) getOrCreateEntry(ctx context.Context, nzoID, filename string) (
 		return nil, key, err
 	}
 
-	newEntry, err := u.createEntry(file)
+	newEntry, err := u.createEntry(file, u.prefetchSize)
 	if err != nil {
 		return nil, key, err
 	}
@@ -536,6 +539,19 @@ func (u *Usenet) Process(ctx context.Context, nzb *storage.NZB, groups map[strin
 	if err := u.checkNZBAvailability(ctx, updatedNZB); err != nil {
 		_ = u.markAsFailed(updatedNZB, err)
 		return updatedNZB, fmt.Errorf("availability check failed: %w", err)
+	}
+
+	// Content gate: availability only proves the articles exist; it says
+	// nothing about whether the assembled stream is the file it claims to be.
+	// A wrong RAR volume order or a misordered raw post passes every STAT
+	// probe yet serves garbage from byte 0 (players see no codec and a bogus
+	// size/bitrate runtime). Read each media file's head through the real
+	// serving path and require a container signature, so a scrambled assembly
+	// fails here — and the arr grabs a replacement — instead of reaching the
+	// library as an unplayable file.
+	if err := u.verifyNZBContent(ctx, updatedNZB); err != nil {
+		_ = u.markAsFailed(updatedNZB, err)
+		return updatedNZB, fmt.Errorf("content verification failed: %w", err)
 	}
 
 	// Mark as completed

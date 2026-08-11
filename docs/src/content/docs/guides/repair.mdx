@@ -55,6 +55,7 @@ You can force a recheck on any one entry from the Browse UI or the API. This wor
     "arrs": [],
     "auto_repair": true,
     "skip_nzb_repair": false,
+    "verify_content": false,
     "notify_on_complete": false,
     "nntp_connection_percent": 20,
     "stop_schedule": "06:00"
@@ -73,6 +74,7 @@ You can force a recheck on any one entry from the Browse UI or the API. This wor
 | `arrs`                    | Optional filter when `source=arr`. Empty list means all eligible Arrs.                   | `[]`        |
 | `auto_repair`             | When `true`, brokens are repaired in the same sweep. When `false`, the sweep is detect-only. | `false` |
 | `skip_nzb_repair`         | Skip NZB / Usenet entries during scheduled sweeps.                                      | `false` |
+| `verify_content`          | During NZB probes, also read each media file's head through the streaming stack and check for a valid container signature. Finds files whose articles exist but were assembled wrong. Downloads one article per file probed. | `false` |
 | `notify_on_complete`      | Send a notification when a sweep finishes.                                               | `false`     |
 | `nntp_connection_percent` | Percentage of NNTP connections the probe is allowed to use. Avoids starving downloads.   | `20`        |
 | `stop_schedule`           | Optional cron expression, clock time, or interval. If a repair sweep is still running when this fires, it's stopped early. Leave empty to always run to completion. | — |
@@ -140,7 +142,7 @@ A failure to persist a single entry's health update is logged but never aborts t
 | `GET`    | `/api/repair/config`                  | Read current config.                                                     |
 | `PUT`    | `/api/repair/config`                  | Update config (validates cron, workers, source).                         |
 | `GET`    | `/api/repair/status`                  | Active run summary, last completed run, and counts of entries by status. |
-| `POST`   | `/api/repair/run`                     | Trigger a sweep now. Body can include `ignore_last_checked`, `auto_repair`, `unrestrict_link`, and `protocol`. |
+| `POST`   | `/api/repair/run`                     | Trigger a sweep now. Body can include `ignore_last_checked`, `auto_repair`, `unrestrict_link`, `verify_content`, and `protocol`. |
 | `POST`   | `/api/repair/stop`                    | Cancel the active run.                                                   |
 | `GET`    | `/api/repair/runs`                    | Run history.                                                             |
 | `GET`    | `/api/repair/runs/{id}`               | Run detail.                                                              |

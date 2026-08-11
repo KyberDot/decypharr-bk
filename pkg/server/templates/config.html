@@ -1684,6 +1684,12 @@ fe80::/10</textarea>
                                        id="repair.skip_nzb_repair" name="repair.skip_nzb_repair">
                                 <span class="label-text font-medium">Skip NZB repair</span>
                             </label>
+                            <label class="label cursor-pointer justify-start gap-3"
+                                   title="Read each media file's head and check for a valid container signature during NZB probes. Finds files whose articles exist but were assembled wrong. Downloads one article per file probed.">
+                                <input type="checkbox" class="checkbox checkbox-primary checkbox-sm"
+                                       id="repair.verify_content" name="repair.verify_content">
+                                <span class="label-text font-medium">Verify NZB content</span>
+                            </label>
                         </div>
                     </div>
                 </div>
