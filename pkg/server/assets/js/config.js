@@ -7,6 +7,8 @@ class ConfigManager {
         this.debridDirectoryCounts = {};
         this.directoryFilterCounts = {};
         this.virtualFolderCount = 0;
+        this.virtualFolderConditionCounts = {};
+        this.virtualFolderProviders = [];
 
         this.refs = {
             configForm: document.getElementById('configForm'),
@@ -48,6 +50,9 @@ class ConfigManager {
         this.refs.addArrBtn.addEventListener('click', () => this.addArrConfig());
         this.refs.addVirtualFolderBtn.addEventListener('click', () => this.addVirtualFolder());
         this.refs.addUsenetProviderBtn.addEventListener('click', () => this.addUsenetProvider());
+
+		this.refs.virtualFoldersContainer.addEventListener('input', (event) => this.handleVirtualFolderInput(event));
+		this.refs.virtualFoldersContainer.addEventListener('change', (event) => this.handleVirtualFolderInput(event));
 
         const addRuleBtn = document.getElementById('addQueueCleanupRuleBtn');
         if (addRuleBtn) addRuleBtn.addEventListener('click', () => this.addQueueCleanupCustomRow());
@@ -112,10 +117,11 @@ class ConfigManager {
             this.populateUsenetSettings(config.usenet);
         }
 
-        // Load virtual folders
-        if (config.custom_folders) {
-            this.populateVirtualFolders(config.custom_folders);
-        }
+        // Load virtual folders after provider names are known so the rule
+        // builder can offer provider choices.
+        this.virtualFolderProviders = (config.debrids || []).map(debrid => debrid.name).filter(Boolean);
+        if (config.usenet?.providers?.length) this.virtualFolderProviders.push('usenet');
+        this.populateVirtualFolders(config.virtual_folders || []);
 
         // Load Arr configs
         if (config.arrs && Array.isArray(config.arrs)) {
@@ -1140,8 +1146,19 @@ class ConfigManager {
             // Validate configuration
             const validation = this.validateConfiguration(config);
             if (!validation.valid) {
+                const virtualFolderErrors = validation.errors.filter(error => error.startsWith('Virtual folder'));
+                const summary = document.getElementById('virtualFolderValidationSummary');
+                if (summary && virtualFolderErrors.length) {
+                    summary.querySelector('[data-vf-validation-list]').innerHTML = virtualFolderErrors
+                        .map(error => `<li>${window.decypharrUtils.escapeHtml(error)}</li>`).join('');
+                    summary.classList.remove('hidden');
+                    window.location.hash = 'tab-virtual-folders';
+                    setTimeout(() => summary.focus(), 0);
+                }
                 throw new Error(validation.errors.join('\n'));
             }
+
+            document.getElementById('virtualFolderValidationSummary')?.classList.add('hidden');
 
             const response = await window.decypharrUtils.fetcher('/api/config', {
                 method: 'POST',
@@ -1200,6 +1217,24 @@ class ConfigManager {
             if (arr.host && !this.isValidUrl(arr.host)) {
                 errors.push(`Arr service #${index + 1}: Invalid host URL format`);
             }
+        });
+
+        // Validate virtual folders using the same user-facing contract as the
+        // backend. Case-insensitive checks avoid collisions on common mounts.
+        const reservedFolderNames = new Set(['__all__', '__bad__', 'torrents', 'nzbs', 'version.txt']);
+        config.debrids.forEach(debrid => reservedFolderNames.add((debrid.name || '').trim().toLowerCase()));
+        const seenVirtualFolderNames = new Set();
+        (config.virtual_folders || []).forEach((folder, index) => {
+            this.validateVirtualFolderDefinition(folder).forEach(error => errors.push(`Virtual folder #${index + 1}: ${error}`));
+            const normalizedName = (folder.name || '').trim().toLowerCase();
+            if (!normalizedName) return;
+            if (reservedFolderNames.has(normalizedName)) {
+                errors.push(`Virtual folder "${folder.name}": the name conflicts with a built-in or provider folder.`);
+            }
+            if (seenVirtualFolderNames.has(normalizedName)) {
+                errors.push(`Virtual folder "${folder.name}" is defined more than once.`);
+            }
+            seenVirtualFolderNames.add(normalizedName);
         });
 
         if (!config.mount.type) {
@@ -1264,7 +1299,7 @@ class ConfigManager {
             folder_naming: document.querySelector('[name="folder_naming"]')?.value || "",
             disable_webdav: document.querySelector('[name="disable_webdav"]').checked,
             refresh_dirs: document.querySelector('[name="refresh_dirs"]')?.value || "",
-            custom_folders: this.collectVirtualFolders(),
+            virtual_folders: this.collectVirtualFolders(),
 
             // Debrid configurations
             debrids: this.collectDebridConfigs(),
@@ -1737,163 +1772,455 @@ class ConfigManager {
     }
 
     // Virtual Folders Management
-    populateVirtualFolders(customFolders) {
-        if (!customFolders) return;
-
-        Object.entries(customFolders).forEach(([folderName, folderData]) => {
-            this.addVirtualFolder(folderName, folderData.filters);
-        });
+    get virtualFolderFields() {
+        const textOperators = [
+            ['contains', 'contains'], ['not_contains', 'does not contain'],
+            ['starts_with', 'starts with'], ['not_starts_with', 'does not start with'],
+            ['ends_with', 'ends with'], ['not_ends_with', 'does not end with'],
+            ['equals', 'is exactly'], ['not_equals', 'is not exactly'],
+            ['matches_regex', 'matches regular expression'], ['not_matches_regex', 'does not match regular expression']
+        ];
+        return [
+            {value: 'entry_name', label: 'Item name', help: 'The release or library folder name', operators: textOperators, placeholder: 'e.g., 2160p'},
+            {value: 'file_name', label: 'File name inside item', help: 'Any file path contained in the item', operators: textOperators, placeholder: 'e.g., S01E'},
+            {value: 'size', label: 'Total item size', help: 'The combined size of the item', operators: [['greater_than', 'is larger than'], ['less_than', 'is smaller than']], placeholder: 'e.g., 20GB'},
+            {value: 'added', label: 'Date added', help: 'How recently the item was added', operators: [['within_last', 'is within the last']], placeholder: 'e.g., 7d'},
+            {value: 'file_count', label: 'Number of files', help: 'How many files the item contains', operators: [['greater_than', 'is more than'], ['less_than', 'is fewer than']], placeholder: 'e.g., 5'},
+            {value: 'protocol', label: 'Source type', help: 'Torrent or Usenet/NZB', operators: [['equals', 'is'], ['not_equals', 'is not']]},
+            {value: 'provider', label: 'Provider', help: 'The provider currently serving the item', operators: [['equals', 'is'], ['not_equals', 'is not']], placeholder: 'Provider name'},
+            {value: 'category', label: 'Category', help: 'The Arr or download category assigned to the item', operators: textOperators, placeholder: 'e.g., radarr'}
+        ];
     }
 
-    addVirtualFolder(folderName = '', filters = {}) {
-        const id = this.virtualFolderCount++;
-        const filterEntries = Object.entries(filters);
+    get virtualFolderSamples() {
+        const episodePattern = '(?:S\\d{1,2}E\\d{1,3}|\\b\\d{1,2}x\\d{1,3}\\b)';
+        return [
+            {
+                key: 'episodes',
+                label: 'Episode files',
+                description: 'Has a file named like S01E02 or 1x02',
+                condition: {field: 'file_name', operator: 'matches_regex', value: episodePattern}
+            },
+            {
+                key: 'movies',
+                label: 'Likely movie',
+                description: 'Has no file named like S01E02 or 1x02; this is a filename-based estimate',
+                condition: {field: 'file_name', operator: 'not_matches_regex', value: episodePattern}
+            },
+            {
+                key: 'multiple-files',
+                label: 'More than one file',
+                description: 'Contains at least two files',
+                condition: {field: 'file_count', operator: 'greater_than', value: '1'}
+            },
+            {
+                key: '4k',
+                label: '4K items',
+                description: 'Item name contains 2160p',
+                condition: {field: 'entry_name', operator: 'contains', value: '2160p'}
+            },
+            {
+                key: 'recent',
+                label: 'Added this week',
+                description: 'Was added within the last seven days',
+                condition: {field: 'added', operator: 'within_last', value: '7d'}
+            },
+            {
+                key: 'torrent',
+                label: 'Torrent only',
+                description: 'Uses a torrent source',
+                condition: {field: 'protocol', operator: 'equals', value: 'torrent'}
+            }
+        ];
+    }
 
+    virtualFolderField(field) {
+        return this.virtualFolderFields.find(option => option.value === field) || this.virtualFolderFields[0];
+    }
+
+    populateVirtualFolders(folders) {
+        if (!Array.isArray(folders)) return;
+        if (folders.length === 0) {
+            this.renderVirtualFolderEmptyState();
+            return;
+        }
+        folders.forEach(folder => this.addVirtualFolder(folder, false));
+    }
+
+    virtualFolderFieldOptions(selected) {
+        return this.virtualFolderFields.map(field =>
+            `<option value="${field.value}" ${field.value === selected ? 'selected' : ''}>${field.label}</option>`
+        ).join('');
+    }
+
+    virtualFolderOperatorOptions(fieldName, selected) {
+        const field = this.virtualFolderField(fieldName);
+        return field.operators.map(([value, label]) =>
+            `<option value="${value}" ${value === selected ? 'selected' : ''}>${label}</option>`
+        ).join('');
+    }
+
+    virtualFolderValueControl(folderId, conditionId, condition) {
+        const esc = window.decypharrUtils.escapeHtml;
+        const id = `virtual_folder_${folderId}_condition_${conditionId}_value`;
+        if (condition.field === 'protocol') {
+            const value = ['torrent', 'nzb'].includes(condition.value) ? condition.value : 'torrent';
+            return `<select id="${id}" class="select select-bordered w-full vf-condition-value" data-vf-value aria-required="true">
+                <option value="torrent" ${value === 'torrent' ? 'selected' : ''}>Torrent</option>
+                <option value="nzb" ${value === 'nzb' ? 'selected' : ''}>Usenet / NZB</option>
+            </select>`;
+        }
+        if (condition.field === 'provider' && this.virtualFolderProviders.length > 0) {
+            const values = [...this.virtualFolderProviders];
+            if (condition.value && !values.includes(condition.value)) values.push(condition.value);
+            return `<select id="${id}" class="select select-bordered w-full vf-condition-value" data-vf-value aria-required="true">
+                ${values.map(value => `<option value="${esc(value)}" ${value === condition.value ? 'selected' : ''}>${esc(value)}</option>`).join('')}
+            </select>`;
+        }
+        const field = this.virtualFolderField(condition.field);
+        const numberAttributes = condition.field === 'file_count' ? 'type="number" min="0" step="1" inputmode="numeric"' : 'type="text"';
+        return `<input ${numberAttributes} id="${id}" class="input input-bordered w-full vf-condition-value" data-vf-value aria-required="true"
+            value="${esc(condition.value || '')}" placeholder="${esc(field.placeholder || '')}" autocomplete="off">`;
+    }
+
+    renderVirtualFolderCondition(folderId, conditionId, condition = {}) {
+        const field = this.virtualFolderField(condition.field || 'entry_name');
+        const operatorValues = field.operators.map(([value]) => value);
+        const normalized = {
+            field: field.value,
+            operator: operatorValues.includes(condition.operator) ? condition.operator : operatorValues[0],
+            value: condition.value || '',
+            case_sensitive: Boolean(condition.case_sensitive)
+        };
+        const supportsCase = ['entry_name', 'file_name', 'provider', 'category'].includes(normalized.field);
+        const fieldHelpId = `virtual_folder_${folderId}_condition_${conditionId}_help`;
+        return `
+            <div class="rounded-box border border-base-300 bg-base-100 p-4" data-vf-condition="${conditionId}" data-vf-current-field="${normalized.field}">
+                <div class="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto] lg:items-end">
+                    <div>
+                        <label class="label py-1" for="virtual_folder_${folderId}_condition_${conditionId}_field"><span class="label-text font-medium">What to check</span></label>
+                        <select id="virtual_folder_${folderId}_condition_${conditionId}_field" class="select select-bordered w-full" data-vf-field aria-describedby="${fieldHelpId}">
+                            ${this.virtualFolderFieldOptions(normalized.field)}
+                        </select>
+                    </div>
+                    <div>
+                        <label class="label py-1" for="virtual_folder_${folderId}_condition_${conditionId}_operator"><span class="label-text font-medium">Rule</span></label>
+                        <select id="virtual_folder_${folderId}_condition_${conditionId}_operator" class="select select-bordered w-full" data-vf-operator>
+                            ${this.virtualFolderOperatorOptions(normalized.field, normalized.operator)}
+                        </select>
+                    </div>
+                    <div>
+                        <label class="label py-1" for="virtual_folder_${folderId}_condition_${conditionId}_value"><span class="label-text font-medium">Value</span></label>
+                        ${this.virtualFolderValueControl(folderId, conditionId, normalized)}
+                    </div>
+                    <button type="button" class="btn btn-ghost btn-square text-error" aria-label="Remove this condition"
+                            title="Remove condition" onclick="configManager.removeVirtualFolderCondition(${folderId}, ${conditionId})">
+                        <i class="bi bi-trash" aria-hidden="true"></i>
+                    </button>
+                </div>
+                <div class="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <p id="${fieldHelpId}" class="text-xs text-base-content/65" data-vf-field-help>${field.help}</p>
+                    <label class="label cursor-pointer justify-start gap-2 p-0 text-xs ${supportsCase ? '' : 'hidden'}" data-vf-case-wrap>
+                        <input type="checkbox" class="checkbox checkbox-xs" data-vf-case ${normalized.case_sensitive ? 'checked' : ''}>
+                        Match capitalization exactly
+                    </label>
+                </div>
+            </div>`;
+    }
+
+    renderVirtualFolderSamples(folderId) {
+        const esc = window.decypharrUtils.escapeHtml;
+        const labelId = `virtual_folder_${folderId}_samples_label`;
+        const helpId = `virtual_folder_${folderId}_samples_help`;
+        return `<div class="rounded-box bg-base-200/70 p-4">
+            <p id="${labelId}" class="text-sm font-semibold">Quick examples</p>
+            <p id="${helpId}" class="mt-1 text-xs text-base-content/65">Choose one to fill an unused condition or add a new editable condition.</p>
+            <div class="mt-3 flex flex-wrap gap-2" role="group" aria-labelledby="${labelId}" aria-describedby="${helpId}">
+                ${this.virtualFolderSamples.map(sample => `<button type="button" class="btn btn-sm btn-outline bg-base-100"
+                    title="${esc(sample.description)}" aria-label="${esc(`${sample.label}: ${sample.description}`)}"
+                    onclick="configManager.applyVirtualFolderSample(${folderId}, '${sample.key}')">${esc(sample.label)}</button>`).join('')}
+            </div>
+        </div>`;
+    }
+
+    addVirtualFolder(definition = null, shouldFocus = true) {
+        this.refs.virtualFoldersContainer.querySelector('[data-vf-empty-state]')?.remove();
+        const isNewFolder = definition === null;
+        definition = definition || {};
+        const id = this.virtualFolderCount++;
+        const conditions = Array.isArray(definition.conditions)
+            ? definition.conditions
+            : (isNewFolder ? [{field: 'entry_name', operator: 'contains', value: ''}] : []);
+        this.virtualFolderConditionCounts[id] = conditions.length;
+        const esc = window.decypharrUtils.escapeHtml;
+        const name = definition.name || '';
+        const title = name || `New virtual folder ${id + 1}`;
         const folderHtml = `
-            <div class="card bg-base-200 shadow-sm" data-virtual-folder="${id}">
-                <div class="card-body p-4">
-                    <div class="flex justify-between items-start mb-4">
-                        <h4 class="font-semibold text-lg">Virtual Folder</h4>
-                        <button type="button" class="btn btn-ghost btn-sm btn-circle" onclick="configManager.removeVirtualFolder(${id});">
-                            <i class="bi bi-x-lg"></i>
+            <article class="card bg-base-100 shadow-sm border border-base-300" data-virtual-folder="${id}" aria-labelledby="virtual_folder_${id}_title">
+                <div class="card-body p-4 sm:p-6 gap-5">
+                    <div class="flex items-start justify-between gap-4">
+                        <div>
+                            <p class="text-xs font-semibold uppercase tracking-wide text-info">Filtered library view</p>
+                            <h4 id="virtual_folder_${id}_title" class="mt-1 text-lg font-semibold" data-vf-title>${esc(title)}</h4>
+                        </div>
+                        <button type="button" class="btn btn-ghost btn-sm btn-square" aria-label="Remove virtual folder ${esc(title)}"
+                                title="Remove virtual folder" onclick="configManager.removeVirtualFolder(${id})">
+                            <i class="bi bi-x-lg" aria-hidden="true"></i>
                         </button>
                     </div>
 
-                    <div class="space-y-4">
+                    <div class="grid grid-cols-1 gap-4 lg:grid-cols-2">
                         <div>
-                            <label class="label">
-                                <span class="font-medium">Folder Name</span>
-                            </label>
-                            <input type="text"
-                                   class="input input-bordered w-full"
-                                   name="virtual_folder_${id}_name"
-                                   value="${window.decypharrUtils.escapeHtml(folderName)}"
-                                   placeholder="e.g., Movies, TV Shows, 4K"
-                                   required>
-                            <span class="text-sm opacity-70">This folder will appear in your mount</span>
+                            <label class="label" for="virtual_folder_${id}_name"><span class="label-text font-medium">Folder name</span></label>
+                            <input type="text" id="virtual_folder_${id}_name" class="input input-bordered w-full" data-vf-name
+                                   value="${esc(name)}" placeholder="e.g., 4K Movies" aria-describedby="virtual_folder_${id}_name_help" aria-required="true" autocomplete="off">
+                            <p id="virtual_folder_${id}_name_help" class="mt-1 text-xs text-base-content/65">Appears at the top level of Browse, mounts, and shares.</p>
                         </div>
-
                         <div>
-                            <label class="label">
-                                <span class="font-medium">Filters</span>
-                                <button type="button" class="btn btn-xs btn-primary" onclick="configManager.addVirtualFolderFilter(${id});">
-                                    <i class="bi bi-plus"></i> Add Filter
-                                </button>
-                            </label>
-                            <div class="space-y-2" id="virtual_folder_${id}_filters">
-                                ${filterEntries.length > 0 ? filterEntries.map(([key, value], index) => `
-                                    <div class="flex gap-2" data-filter-index="${index}">
-                                        <input type="text"
-                                               class="input input-bordered input-sm flex-1"
-                                               name="virtual_folder_${id}_filter_key_${index}"
-                                               value="${window.decypharrUtils.escapeHtml(key)}"
-                                               placeholder="Filter key (e.g., name, category)">
-                                        <input type="text"
-                                               class="input input-bordered input-sm flex-1"
-                                               name="virtual_folder_${id}_filter_value_${index}"
-                                               value="${window.decypharrUtils.escapeHtml(value)}"
-                                               placeholder="Filter value (e.g., *movie*, tv)">
-                                        <button type="button" class="btn btn-sm btn-ghost btn-circle" onclick="configManager.removeVirtualFolderFilter(${id}, ${index});">
-                                            <i class="bi bi-trash"></i>
-                                        </button>
-                                    </div>
-                                `).join('') : `
-                                    <div class="text-sm opacity-70">No filters. Click "Add Filter" to add one.</div>
-                                `}
-                            </div>
-                            <span class="text-sm opacity-70">Filters use wildcards: * for any characters, ? for single character</span>
+                            <label class="label" for="virtual_folder_${id}_match"><span class="label-text font-medium">An item should match</span></label>
+                            <select id="virtual_folder_${id}_match" class="select select-bordered w-full" data-vf-match>
+                                <option value="all" ${(definition.match || 'all') === 'all' ? 'selected' : ''}>All conditions</option>
+                                <option value="any" ${definition.match === 'any' ? 'selected' : ''}>Any condition</option>
+                            </select>
+                            <p class="mt-1 text-xs text-base-content/65">This choice is explicit—there are no hidden combinations.</p>
                         </div>
                     </div>
+
+                    <label class="label cursor-pointer justify-start gap-3 rounded-box bg-base-200 px-4 py-3">
+                        <input type="checkbox" class="checkbox checkbox-sm checkbox-info" data-vf-include-bad ${definition.include_bad ? 'checked' : ''}>
+                        <span><span class="font-medium">Include unhealthy items</span><span class="block text-xs text-base-content/65">Off by default so broken or unavailable entries stay out of this view.</span></span>
+                    </label>
+
+                    <fieldset class="space-y-3">
+                        <legend class="sr-only">Conditions for ${esc(title)}</legend>
+                        ${this.renderVirtualFolderSamples(id)}
+                        <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                            <div>
+                                <p class="font-semibold" aria-hidden="true">Conditions</p>
+                                <p class="text-xs text-base-content/65">Text matching ignores capitalization unless you opt in per condition.</p>
+                            </div>
+                            <button type="button" class="btn btn-sm btn-outline btn-info" onclick="configManager.addVirtualFolderCondition(${id})">
+                                <i class="bi bi-plus-lg" aria-hidden="true"></i> Add condition
+                            </button>
+                        </div>
+                        <div class="space-y-3" id="virtual_folder_${id}_conditions" data-vf-conditions>
+                            ${conditions.length ? conditions.map((condition, index) => this.renderVirtualFolderCondition(id, index, condition)).join('') : this.virtualFolderNoConditions()}
+                        </div>
+                    </fieldset>
+
+                    <div class="flex flex-col gap-3 border-t border-base-300 pt-4 sm:flex-row sm:items-center sm:justify-between">
+                        <p class="text-xs text-base-content/65"><i class="bi bi-shield-check mr-1" aria-hidden="true"></i>Removing this folder removes only the view, never the media.</p>
+                        <button type="button" class="btn btn-sm btn-secondary" data-vf-preview-button onclick="configManager.previewVirtualFolder(${id})">
+                            <i class="bi bi-eye" aria-hidden="true"></i> Preview matches
+                        </button>
+                    </div>
+                    <div class="hidden rounded-box bg-base-200 p-4 text-sm" data-vf-preview-result role="status" aria-live="polite"></div>
                 </div>
-            </div>
-        `;
-
+            </article>`;
         this.refs.virtualFoldersContainer.insertAdjacentHTML('beforeend', folderHtml);
+        const folder = this.refs.virtualFoldersContainer.querySelector(`[data-virtual-folder="${id}"]`);
+        if (shouldFocus) {
+            folder?.querySelector('[data-vf-name]')?.focus();
+            this.announceVirtualFolder(`Added ${title}.`);
+        }
     }
 
-    addVirtualFolderFilter(folderId) {
-        const container = document.getElementById(`virtual_folder_${folderId}_filters`);
-        const existingFilters = container.querySelectorAll('[data-filter-index]');
-        const newIndex = existingFilters.length;
-
-        // Remove "no filters" message if it exists
-        const noFiltersMsg = container.querySelector('.text-sm.opacity-70');
-        if (noFiltersMsg) {
-            noFiltersMsg.remove();
-        }
-
-        const filterHtml = `
-            <div class="flex gap-2" data-filter-index="${newIndex}">
-                <input type="text"
-                       class="input input-bordered input-sm flex-1"
-                       name="virtual_folder_${folderId}_filter_key_${newIndex}"
-                       placeholder="Filter key (e.g., name, category)">
-                <input type="text"
-                       class="input input-bordered input-sm flex-1"
-                       name="virtual_folder_${folderId}_filter_value_${newIndex}"
-                       placeholder="Filter value (e.g., *movie*, tv)">
-                <button type="button" class="btn btn-sm btn-ghost btn-circle" onclick="configManager.removeVirtualFolderFilter(${folderId}, ${newIndex});">
-                    <i class="bi bi-trash"></i>
-                </button>
-            </div>
-        `;
-
-        container.insertAdjacentHTML('beforeend', filterHtml);
+    renderVirtualFolderEmptyState() {
+        this.refs.virtualFoldersContainer.innerHTML = `<div class="rounded-box border border-dashed border-base-300 bg-base-100 p-8 text-center" data-vf-empty-state>
+            <i class="bi bi-folder-plus text-3xl text-base-content/40" aria-hidden="true"></i>
+            <p class="mt-3 font-medium">No virtual folders yet</p>
+            <p class="mt-1 text-sm text-base-content/65">Add one to create a focused view such as 4K, Recently Added, or a provider-specific library.</p>
+        </div>`;
     }
 
-    removeVirtualFolderFilter(folderId, filterIndex) {
-        const container = document.getElementById(`virtual_folder_${folderId}_filters`);
-        const filter = container.querySelector(`[data-filter-index="${filterIndex}"]`);
-        if (filter) {
-            filter.remove();
+    virtualFolderNoConditions() {
+        return `<div class="rounded-box border border-dashed border-base-300 p-4 text-sm text-base-content/70" data-vf-no-conditions>
+            No conditions yet. This view will show every healthy item.
+        </div>`;
+    }
+
+    addVirtualFolderCondition(folderId) {
+        const container = document.getElementById(`virtual_folder_${folderId}_conditions`);
+        if (!container) return;
+        container.querySelector('[data-vf-no-conditions]')?.remove();
+        const conditionId = this.virtualFolderConditionCounts[folderId]++;
+        container.insertAdjacentHTML('beforeend', this.renderVirtualFolderCondition(folderId, conditionId));
+        container.querySelector(`[data-vf-condition="${conditionId}"] [data-vf-field]`)?.focus();
+        this.invalidateVirtualFolderPreview(container.closest('[data-virtual-folder]'));
+        this.announceVirtualFolder('Condition added.');
+    }
+
+    applyVirtualFolderSample(folderId, sampleKey) {
+        const sample = this.virtualFolderSamples.find(option => option.key === sampleKey);
+        const container = document.getElementById(`virtual_folder_${folderId}_conditions`);
+        if (!sample || !container) return;
+
+        const blankRow = [...container.querySelectorAll('[data-vf-condition]')]
+            .find(row => this.conditionFromRow(row).value === '');
+        let conditionId;
+        if (blankRow) {
+            conditionId = Number(blankRow.dataset.vfCondition);
+            blankRow.outerHTML = this.renderVirtualFolderCondition(folderId, conditionId, sample.condition);
+        } else {
+            container.querySelector('[data-vf-no-conditions]')?.remove();
+            conditionId = this.virtualFolderConditionCounts[folderId]++;
+            container.insertAdjacentHTML('beforeend', this.renderVirtualFolderCondition(folderId, conditionId, sample.condition));
         }
 
-        // Show "no filters" message if no filters remain
-        const remainingFilters = container.querySelectorAll('[data-filter-index]');
-        if (remainingFilters.length === 0) {
-            container.innerHTML = '<div class="text-sm opacity-70">No filters. Click "Add Filter" to add one.</div>';
+        const row = container.querySelector(`[data-vf-condition="${conditionId}"]`);
+        row?.querySelector('[data-vf-value]')?.focus();
+        this.invalidateVirtualFolderPreview(container.closest('[data-virtual-folder]'));
+        this.announceVirtualFolder(`${sample.label} example applied. You can edit it before saving.`);
+    }
+
+    removeVirtualFolderCondition(folderId, conditionId) {
+        const container = document.getElementById(`virtual_folder_${folderId}_conditions`);
+        if (!container) return;
+        container.querySelector(`[data-vf-condition="${conditionId}"]`)?.remove();
+        if (!container.querySelector('[data-vf-condition]')) container.innerHTML = this.virtualFolderNoConditions();
+        this.invalidateVirtualFolderPreview(container.closest('[data-virtual-folder]'));
+        this.announceVirtualFolder('Condition removed.');
+    }
+
+    conditionFromRow(row) {
+        return {
+            field: row.querySelector('[data-vf-field]')?.value || 'entry_name',
+            operator: row.querySelector('[data-vf-operator]')?.value || 'contains',
+            value: (row.querySelector('[data-vf-value]')?.value || '').trim(),
+            case_sensitive: Boolean(row.querySelector('[data-vf-case]')?.checked)
+        };
+    }
+
+    refreshVirtualFolderCondition(row) {
+        const folder = row.closest('[data-virtual-folder]');
+        if (!folder) return;
+        const folderId = Number(folder.dataset.virtualFolder);
+        const conditionId = Number(row.dataset.vfCondition);
+        const previousField = row.dataset.vfCurrentField;
+        const condition = this.conditionFromRow(row);
+        const field = this.virtualFolderField(condition.field);
+        if (previousField !== condition.field) condition.value = '';
+        if (!field.operators.some(([value]) => value === condition.operator)) condition.operator = field.operators[0][0];
+        if (condition.field === 'protocol' && !['torrent', 'nzb'].includes(condition.value)) condition.value = 'torrent';
+        if (condition.field === 'provider' && this.virtualFolderProviders.length && !this.virtualFolderProviders.includes(condition.value)) {
+            condition.value = this.virtualFolderProviders[0];
         }
+        row.outerHTML = this.renderVirtualFolderCondition(folderId, conditionId, condition);
+        folder.querySelector(`[data-vf-condition="${conditionId}"] [data-vf-field]`)?.focus();
+    }
+
+    handleVirtualFolderInput(event) {
+        const folder = event.target.closest('[data-virtual-folder]');
+        if (!folder) return;
+        if (event.type === 'change' && event.target.matches('[data-vf-field]')) {
+            this.refreshVirtualFolderCondition(event.target.closest('[data-vf-condition]'));
+        }
+        if (event.target.matches('[data-vf-name]')) {
+            const title = event.target.value.trim() || `New virtual folder ${Number(folder.dataset.virtualFolder) + 1}`;
+            folder.querySelector('[data-vf-title]').textContent = title;
+        }
+        this.invalidateVirtualFolderPreview(folder);
+    }
+
+    invalidateVirtualFolderPreview(folder) {
+        const result = folder?.querySelector('[data-vf-preview-result]');
+        if (!result) return;
+        result.classList.add('hidden');
+        result.innerHTML = '';
     }
 
     removeVirtualFolder(id) {
-        const folder = document.querySelector(`[data-virtual-folder="${id}"]`);
-        if (folder && confirm('Are you sure you want to remove this virtual folder?')) {
+        const folder = this.refs.virtualFoldersContainer.querySelector(`[data-virtual-folder="${id}"]`);
+        if (!folder) return;
+        const name = folder.querySelector('[data-vf-name]')?.value.trim() || 'this virtual folder';
+        if (confirm(`Remove "${name}"?\n\nThis removes only the filtered view. Your media will not be deleted.`)) {
             folder.remove();
+            delete this.virtualFolderConditionCounts[id];
+            if (!this.refs.virtualFoldersContainer.querySelector('[data-virtual-folder]')) this.renderVirtualFolderEmptyState();
+            this.announceVirtualFolder(`${name} removed. Save settings to apply this change.`);
         }
     }
 
+    collectVirtualFolder(folderEl) {
+        return {
+            name: (folderEl.querySelector('[data-vf-name]')?.value || '').trim(),
+            match: folderEl.querySelector('[data-vf-match]')?.value || 'all',
+            include_bad: Boolean(folderEl.querySelector('[data-vf-include-bad]')?.checked),
+            conditions: Array.from(folderEl.querySelectorAll('[data-vf-condition]')).map(row => this.conditionFromRow(row))
+        };
+    }
+
     collectVirtualFolders() {
-        const customFolders = {};
-        const folderElements = this.refs.virtualFoldersContainer.querySelectorAll('[data-virtual-folder]');
+        return Array.from(this.refs.virtualFoldersContainer.querySelectorAll('[data-virtual-folder]'))
+            .map(folder => this.collectVirtualFolder(folder));
+    }
 
-        folderElements.forEach(folderEl => {
-            const id = folderEl.getAttribute('data-virtual-folder');
-            const nameInput = folderEl.querySelector(`[name="virtual_folder_${id}_name"]`);
-            const folderName = nameInput ? nameInput.value.trim() : '';
-
-            if (folderName) {
-                const filters = {};
-                const filterContainer = document.getElementById(`virtual_folder_${id}_filters`);
-                const filterElements = filterContainer.querySelectorAll('[data-filter-index]');
-
-                filterElements.forEach(filterEl => {
-                    const index = filterEl.getAttribute('data-filter-index');
-                    const keyInput = filterEl.querySelector(`[name="virtual_folder_${id}_filter_key_${index}"]`);
-                    const valueInput = filterEl.querySelector(`[name="virtual_folder_${id}_filter_value_${index}"]`);
-
-                    const key = keyInput ? keyInput.value.trim() : '';
-                    const value = valueInput ? valueInput.value.trim() : '';
-
-                    if (key && value) {
-                        filters[key] = value;
-                    }
-                });
-
-                customFolders[folderName] = {filters};
+    validateVirtualFolderDefinition(folder) {
+        const errors = [];
+        if (!folder.name) errors.push('Folder name is required.');
+        if (folder.name === '.' || folder.name === '..' || /[<>:"/\\|?*\u0000-\u001f\u007f]/.test(folder.name)) {
+            errors.push('Folder name contains characters that are not portable across mounts and shares.');
+        }
+        if (/\.$/.test(folder.name) || /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$/i.test(folder.name)) {
+            errors.push('Folder name is reserved by common filesystems.');
+        }
+        folder.conditions.forEach((condition, index) => {
+            const label = `Condition ${index + 1}`;
+            const field = this.virtualFolderField(condition.field);
+            if (!field.operators.some(([value]) => value === condition.operator)) errors.push(`${label} has an unsupported rule.`);
+            if (!condition.value) errors.push(`${label} needs a value.`);
+            if (condition.field === 'size' && condition.value && !/^\d+(?:\.\d+)?\s*(?:B|KB|MB|GB|TB|PB)?$/i.test(condition.value)) {
+                errors.push(`${label} needs a size such as 700MB or 20GB.`);
+            }
+            if (condition.field === 'added' && condition.value && !/^(?=.)(?:\d+w)?(?:\d+d)?(?:\d+(?:\.\d+)?(?:h|m|s))?$/.test(condition.value)) {
+                errors.push(`${label} needs a duration such as 12h, 7d, or 2w.`);
+            }
+            if (condition.field === 'file_count' && condition.value && !/^\d+$/.test(condition.value)) {
+                errors.push(`${label} needs a whole number of files.`);
+            }
+            if (['matches_regex', 'not_matches_regex'].includes(condition.operator) && condition.value) {
+                try { new RegExp(condition.value); } catch (_) { errors.push(`${label} contains an invalid regular expression.`); }
             }
         });
+        return errors;
+    }
 
-        return customFolders;
+    async previewVirtualFolder(id) {
+        const folderEl = this.refs.virtualFoldersContainer.querySelector(`[data-virtual-folder="${id}"]`);
+        if (!folderEl) return;
+        const folder = this.collectVirtualFolder(folderEl);
+        const result = folderEl.querySelector('[data-vf-preview-result]');
+        const button = folderEl.querySelector('[data-vf-preview-button]');
+        const errors = this.validateVirtualFolderDefinition(folder);
+        result.classList.remove('hidden');
+        if (errors.length) {
+            result.innerHTML = `<p class="font-medium text-error">Fix this folder before previewing:</p><ul class="mt-2 list-disc pl-5">${errors.map(error => `<li>${window.decypharrUtils.escapeHtml(error)}</li>`).join('')}</ul>`;
+            return;
+        }
+
+        button.disabled = true;
+        button.setAttribute('aria-busy', 'true');
+        result.textContent = 'Checking your library…';
+        try {
+            const response = await window.decypharrUtils.fetcher('/api/virtual-folders/preview', {
+                method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({folder, limit: 5})
+            });
+            if (!response.ok) throw new Error((await response.text()).trim() || 'Preview failed');
+            const preview = await response.json();
+            const samples = Array.isArray(preview.samples) ? preview.samples : [];
+            result.innerHTML = `<p class="font-semibold">${preview.total} matching item${preview.total === 1 ? '' : 's'}</p>
+                ${samples.length ? `<p class="mt-1 text-xs text-base-content/65">A few examples:</p><ul class="mt-2 space-y-1">${samples.map(item => `<li class="flex flex-wrap justify-between gap-2"><span>${window.decypharrUtils.escapeHtml(item.name)}</span><span class="text-xs text-base-content/60">${window.decypharrUtils.escapeHtml(item.provider || item.protocol || '')}${item.size ? ` · ${window.decypharrUtils.formatBytes(item.size)}` : ''}</span></li>`).join('')}</ul>` : '<p class="mt-1 text-base-content/65">No current item matches these conditions.</p>'}`;
+        } catch (error) {
+            result.innerHTML = `<p class="text-error">Could not preview: ${window.decypharrUtils.escapeHtml(error.message)}</p>`;
+        } finally {
+            button.disabled = false;
+            button.removeAttribute('aria-busy');
+        }
+    }
+
+    announceVirtualFolder(message) {
+        const status = document.getElementById('virtualFolderEditorStatus');
+        if (status) status.textContent = message;
     }
 
     // Usenet Configuration Methods

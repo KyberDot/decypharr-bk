@@ -516,6 +516,11 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	if newConfig.Port == "" {
 		newConfig.Port = "8282"
 	}
+	newConfig.MigrateVirtualFolders()
+	if err := newConfig.ValidateVirtualFolders(); err != nil {
+		http.Error(w, "Invalid virtual folders: "+err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	// Preserve fields that shouldn't be overwritten by frontend
 	currentConfig := config.Get()
@@ -554,6 +559,11 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		go s.Restart()
 	} else {
 		config.Get().ApplyRuntime(&newConfig)
+		if err := s.manager.ApplyVirtualFolders(newConfig.VirtualFolders); err != nil {
+			s.logger.Error().Err(err).Msg("Failed to apply virtual folders after live config update")
+			http.Error(w, "Configuration was saved, but virtual folders could not be applied: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		// Reschedule/reapply the repair sweep if its settings changed.
 		if svc := s.manager.Repair(); svc != nil {
 			if err := svc.ApplyConfig(); err != nil {
@@ -563,6 +573,33 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	utils.JSONResponse(w, map[string]any{"status": "success", "restarted": restarted}, http.StatusOK)
+}
+
+func (s *Server) handlePreviewVirtualFolder(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Folder config.VirtualFolder `json:"folder"`
+		Limit  int                  `json:"limit"`
+	}
+	if err := json.ConfigDefault.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	config.NormalizeVirtualFolder(&req.Folder)
+	if err := config.ValidateVirtualFolder(req.Folder, nil); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	total, samples, err := s.manager.PreviewVirtualFolder(req.Folder, req.Limit)
+	if err != nil {
+		s.logger.Error().Err(err).Msg("Failed to preview virtual folder")
+		http.Error(w, "Failed to preview virtual folder: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	utils.JSONResponse(w, map[string]any{
+		"total":   total,
+		"samples": samples,
+	}, http.StatusOK)
 }
 
 func (s *Server) handleGetRepairConfig(w http.ResponseWriter, r *http.Request) {

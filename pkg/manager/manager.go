@@ -59,8 +59,9 @@ type Manager struct {
 	fixer *Fixer
 	ctx   context.Context
 
-	customFolders *CustomFolders
-	mountManager  MountManager
+	virtualFoldersMu sync.RWMutex
+	virtualFolders   *VirtualFolders
+	mountManager     MountManager
 
 	startTime     time.Time
 	usenetTimeout time.Duration
@@ -216,8 +217,8 @@ func (m *Manager) init() {
 	// Initialize link service
 	m.initLinkService()
 
-	// Init custom folders
-	m.initCustomFolders()
+	// Initialize virtual folders.
+	m.initVirtualFolders()
 
 	// Initialize fixer
 	m.fixer = NewFixer(m)

@@ -173,6 +173,30 @@ type CustomFolders struct {
 	Filters map[string]string `json:"filters,omitempty"`
 }
 
+// VirtualFolder is the canonical, ordered representation of a filtered library
+// view. CustomFolders above is kept only so older config.json files can be
+// migrated without user intervention.
+type VirtualFolder struct {
+	Name       string                   `json:"name"`
+	Match      VirtualFolderMatch       `json:"match,omitempty"`
+	IncludeBad bool                     `json:"include_bad,omitempty"`
+	Conditions []VirtualFolderCondition `json:"conditions,omitempty"`
+}
+
+type VirtualFolderMatch string
+
+const (
+	VirtualFolderMatchAll VirtualFolderMatch = "all"
+	VirtualFolderMatchAny VirtualFolderMatch = "any"
+)
+
+type VirtualFolderCondition struct {
+	Field         string `json:"field"`
+	Operator      string `json:"operator"`
+	Value         string `json:"value"`
+	CaseSensitive bool   `json:"case_sensitive,omitempty"`
+}
+
 type Auth struct {
 	Username string `json:"username,omitempty"`
 	Password string `json:"password,omitempty"`
@@ -266,7 +290,8 @@ type Config struct {
 	AlwaysRmTrackerUrls   bool                     `json:"always_rm_tracker_urls,omitempty"`
 	Categories            []string                 `json:"categories,omitempty"`
 	FolderNaming          WebDavFolderNaming       `json:"folder_naming,omitempty"`
-	CustomFolders         map[string]CustomFolders `json:"custom_folders,omitempty"`
+	CustomFolders         map[string]CustomFolders `json:"custom_folders,omitempty"` // Deprecated: migrated to VirtualFolders.
+	VirtualFolders        []VirtualFolder          `json:"virtual_folders,omitempty"`
 	DefaultDownloadAction DownloadAction           `json:"default_download_action,omitempty"`
 
 	RefreshDirs  string `json:"refresh_dirs,omitempty"`
@@ -338,6 +363,10 @@ func (c *Config) Validate() error {
 	// If either debrid or usenet is enabled, at least one must be configured
 	if len(c.Debrids) == 0 && len(c.Usenet.Providers) == 0 {
 		return errors.New("at least one debrid provider or usenet provider must be configured")
+	}
+
+	if err := c.ValidateVirtualFolders(); err != nil {
+		return err
 	}
 
 	return nil
@@ -493,6 +522,7 @@ func (c *Config) setDefaults() {
 	// Migrate deprecated fields to Manager (backward compatibility)
 	c.migrateQBitTorrentToManager()
 	c.migrateNotifications()
+	c.MigrateVirtualFolders()
 
 	if c.DefaultDownloadAction == "" {
 		c.DefaultDownloadAction = DownloadActionSymlink
@@ -739,6 +769,7 @@ func clearHotFields(c *Config) {
 	c.Categories = nil
 	c.FolderNaming = ""
 	c.CustomFolders = nil
+	c.VirtualFolders = nil
 	c.DefaultDownloadAction = ""
 	c.RefreshDirs = ""
 	c.Retries = 0

@@ -127,6 +127,7 @@ type EntryMetaInfo struct {
 	AddedOn  time.Time
 	Provider string
 	Protocol string
+	Category string
 	Bad      bool
 }
 
@@ -141,6 +142,7 @@ func (s *Storage) ForEachMeta(fn func(*EntryMetaInfo) error) error {
 			AddedOn:  time.Unix(metadataInt64(meta, attributeAddedOn), 0),
 			Provider: meta.Attribute(attributeProvider),
 			Protocol: meta.Attribute(attributeProtocol),
+			Category: meta.Attribute(attributeCategory),
 			Bad:      metadataBool(meta, attributeBad),
 		})
 	})

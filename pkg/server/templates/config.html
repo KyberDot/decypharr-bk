@@ -207,32 +207,40 @@
                     </div>
 
                     <div class="subtab-panel hidden" data-subtab-group="general" data-subtab-panel="virtual-folders">
-                        <div class="space-y-6">
-                            <div class="card bg-base-200">
-                                <div class="card-body">
-                                    <div class="space-y-6">
-                                        <h3 class="text-xl font-bold flex items-center mt-8 mb-4">
-                                            <i class="bi bi-folder-symlink mr-3 text-info"></i>Virtual Folders
-                                            <button type="button" id="addVirtualFolderBtn"
-                                                    class="btn btn-sm btn-info ml-auto">
-                                                <i class="bi bi-plus mr-2"></i>Add Virtual Folder
-                                            </button>
+                        <section class="card bg-base-200" aria-labelledby="virtualFoldersHeading">
+                            <div class="card-body gap-6">
+                                <div class="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                                    <div class="max-w-3xl">
+                                        <h3 id="virtualFoldersHeading" class="text-xl font-bold flex items-center gap-3">
+                                            <i class="bi bi-folder-symlink text-info" aria-hidden="true"></i>
+                                            Virtual Folders
                                         </h3>
+                                        <p class="mt-2 text-sm text-base-content/75">
+                                            Create read-only views of your library. Items are never copied, and can appear in more than one view.
+                                        </p>
+                                    </div>
+                                    <button type="button" id="addVirtualFolderBtn" class="btn btn-info sm:flex-none">
+                                        <i class="bi bi-plus-lg" aria-hidden="true"></i>
+                                        Add virtual folder
+                                    </button>
+                                </div>
 
-                                        <div class="alert alert-info">
-                                            <i class="bi bi-info-circle"></i>
-                                            <span>Virtual folders allow you to organize torrents using custom filters.
-                                                For example, create a "Movies" folder that shows only torrents
-                                                containing movies.</span>
-                                        </div>
-
-                                        <div id="virtualFoldersContainer" class="space-y-4 mt-4">
-                                            <!-- Virtual folders will be dynamically added here -->
-                                        </div>
+                                <div class="alert alert-info items-start" role="note">
+                                    <i class="bi bi-lightbulb mt-0.5" aria-hidden="true"></i>
+                                    <div>
+                                        <p class="font-medium">Start with a name, then add plain-language conditions.</p>
+                                        <p class="text-sm mt-1">Use “all conditions” for combinations such as 4K <em>and</em> recently added. Preview the results before saving.</p>
                                     </div>
                                 </div>
+
+                                <p id="virtualFolderEditorStatus" class="sr-only" role="status" aria-live="polite"></p>
+                                <div id="virtualFolderValidationSummary" class="alert alert-error hidden items-start" role="alert" tabindex="-1">
+                                    <i class="bi bi-exclamation-triangle mt-0.5" aria-hidden="true"></i>
+                                    <div><p class="font-medium">Some virtual-folder settings need attention</p><ul class="mt-2 list-disc pl-5 text-sm" data-vf-validation-list></ul></div>
+                                </div>
+                                <div id="virtualFoldersContainer" class="space-y-5" aria-describedby="virtualFolderEditorStatus"></div>
                             </div>
-                        </div>
+                        </section>
                     </div>
 
                     <div class="subtab-panel hidden" data-subtab-group="general" data-subtab-panel="downloads">
@@ -1710,6 +1718,7 @@ fe80::/10</textarea>
         // links and bookmarks (#tab-auth, ...) pointing at the same settings.
         const movedTabs = {
             downloads: ['general', 'downloads'],
+            'virtual-folders': ['general', 'virtual-folders'],
             auth: ['general', 'auth'],
             notifications: ['general', 'notifications'],
             nfs: ['shares', 'nfs'],
